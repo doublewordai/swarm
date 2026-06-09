@@ -1,6 +1,6 @@
 # Comparing service tiers with this tool
 
-The same Kimi swarm runs on either Doubleword service tier, so you can measure the
+The same Doubleword agent swarm runs on either service tier, so you can measure the
 cost/latency tradeoff yourself across tiers and models. Switching is one flag:
 
 | Flag | Tier | Behaviour |

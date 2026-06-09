@@ -62,3 +62,29 @@ def test_run_audit_no_verify(monkeypatch, tmp_path):
     res = swarm.run_audit(client=None, root=str(tmp_path), files=["a.py"], cfg=cfg)
     assert len(res["findings"]) == 1
     assert res["findings"][0]["verdict"] is None
+
+
+def test_worker_takes_a_tool_round_then_reports(monkeypatch, tmp_path):
+    # Worker uses an immediate tool (grep) on round 1, then report_findings on round 2.
+    (tmp_path / "a.py").write_text("def f(x):\n    return run_command(x)\n")
+    seq = iter([
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [{"type": "function_call", "call_id": "c1", "name": "dispatch_workers",
+                      "arguments": '{"workers":[{"role":"r","focus":"f","files":["a.py"]}]}'}]}],
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [{"type": "function_call", "call_id": "c2", "name": "grep",
+                      "arguments": '{"pattern":"run_command"}'}]}],
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [{"type": "function_call", "call_id": "c3", "name": "report_findings",
+                      "arguments": '{"findings":[{"severity":"high","title":"cmd inj","file":"a.py","line":2,"description":"d","confidence":0.9}]}'}]}],
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}]}],
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "# R"}]}]}],
+    ])
+    monkeypatch.setattr(swarm.R, "dispatch", lambda *a, **k: next(seq))
+    cfg = swarm.SwarmConfig(model="m", verify=False, max_rounds=3)
+    res = swarm.run_audit(client=None, root=str(tmp_path), files=["a.py"], cfg=cfg)
+    assert len(res["findings"]) == 1
+    worker = next(a for a in res["agents"] if a["role"] == "worker")
+    assert worker["rounds"] == 2  # grep round, then report round

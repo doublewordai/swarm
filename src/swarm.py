@@ -47,6 +47,7 @@ class SwarmConfig:
     verify: bool = True
     orchestrator_temperature: float = 0.3
     reasoning_effort: str = "minimal"  # minimal|low|medium|high — minimal keeps K2.6 fast
+    search_enabled: bool = False       # offer web_search/read_page grounding tools
 
 
 # --- input builders (bounded local context) --------------------------------
@@ -160,7 +161,7 @@ def _run_workers(client, root, worker_specs, cfg, tokens, ids, agents, on_event)
         active = [w for w in workers if w.status == "in_progress"]
         if not active:
             break
-        reqs = [_req(cfg.model, w.input_items, tools_=tools.tools_for("worker"),
+        reqs = [_req(cfg.model, w.input_items, tools_=tools.tools_for("worker", cfg.search_enabled),
                      reasoning_effort=cfg.reasoning_effort) for w in active]
         results = R.dispatch(client, reqs, service_tier=cfg.service_tier, background=cfg.background)
         for w, resp in zip(active, results):
@@ -211,7 +212,7 @@ def _run_verifiers(client, root, candidates, cfg, tokens, ids, agents, on_event)
                   input_items=build_verifier_input(root, f), meta={"finding": f})
         vagents.append(a)
         agents.append(a)
-        reqs.append(_req(cfg.model, a.input_items, tools_=tools.tools_for("verifier"),
+        reqs.append(_req(cfg.model, a.input_items, tools_=tools.tools_for("verifier", cfg.search_enabled),
                          reasoning_effort=cfg.reasoning_effort))
     on_event("verify", f"verifying {len(candidates)} finding(s)")
     results = R.dispatch(client, reqs, service_tier=cfg.service_tier, background=cfg.background)

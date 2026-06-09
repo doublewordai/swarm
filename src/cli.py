@@ -1,4 +1,4 @@
-"""CLI for the Kimi agent-swarm code auditor.
+"""CLI for the Doubleword agent-swarm code auditor.
 
 Commands: ``audit`` (run the swarm), ``report`` (print latest results),
 ``compare`` (run the same repo in realtime + async tiers and write analysis.md).
@@ -6,6 +6,7 @@ The target model is a runtime parameter (``--model``), defaulting to Kimi K2.6.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -66,7 +67,7 @@ def _severity_counts(findings):
 
 @click.group()
 def cli():
-    """Kimi agent-swarm code auditor over the Doubleword Open Responses API."""
+    """Doubleword agent-swarm code auditor over the Open Responses API."""
 
 
 @cli.command()
@@ -82,21 +83,26 @@ def cli():
 @click.option("--max-waves", default=2, help="Max orchestrator dispatch waves")
 @click.option("--max-rounds", default=3, help="Max tool rounds per worker")
 @click.option("--no-verify", is_flag=True, help="Skip the adversarial verifier stage")
+@click.option("--enable-search/--no-enable-search", default=None,
+              help="Web-search grounding tools (default: on iff SERPER_API_KEY is set)")
 @click.option("-o", "--output", default="results/", help="Output directory")
 @click.option("--dry-run", is_flag=True, help="Build & print the plan; no API calls")
 def audit(repo_, path_, model, service_tier, background, max_files, max_agents,
-          max_waves, max_rounds, no_verify, output, dry_run):
-    """Run the Kimi swarm to audit a codebase."""
+          max_waves, max_rounds, no_verify, enable_search, output, dry_run):
+    """Run the Doubleword agent swarm to audit a codebase."""
     if bool(repo_) == bool(path_):
         raise click.UsageError("provide exactly one of --repo or --path")
     model_id = _resolve_model(model)
     if background is None:
         background = service_tier == "flex"
+    search_enabled = enable_search if enable_search is not None else bool(os.environ.get("SERPER_API_KEY"))
 
     root, slug, files, dropped = _prepare(repo_, path_, max_files, output)
     click.echo(f"Model:   {model_id}")
     click.echo(f"Target:  {slug}  ({len(files)} source files)")
     click.echo(f"Tier:    {service_tier} (background={background})")
+    click.echo("Tools:   read-only · run_sast · check_advisory"
+               + (" · web_search/read_page" if search_enabled else "  (web search off)"))
     if dropped:
         shown = ", ".join(dropped[:10]) + (" ..." if len(dropped) > 10 else "")
         click.echo(f"NOTE: capped at {max_files} files; skipped {len(dropped)}: {shown}")
@@ -104,14 +110,14 @@ def audit(repo_, path_, model, service_tier, background, max_files, max_agents,
     cfg = swarm.SwarmConfig(
         model=model_id, service_tier=service_tier, background=background,
         max_files=max_files, max_agents=max_agents, max_waves=max_waves,
-        max_rounds=max_rounds, verify=not no_verify,
+        max_rounds=max_rounds, verify=not no_verify, search_enabled=search_enabled,
     )
 
     if dry_run:
         click.echo("\n--- DRY RUN (no API calls) ---")
         click.echo("Orchestrator tools: " + ", ".join(t["name"] for t in tools.tools_for("orchestrator")))
-        click.echo("Worker tools:       " + ", ".join(t["name"] for t in tools.tools_for("worker")))
-        click.echo("Verifier tools:     " + ", ".join(t["name"] for t in tools.tools_for("verifier")))
+        click.echo("Worker tools:       " + ", ".join(t["name"] for t in tools.tools_for("worker", search_enabled)))
+        click.echo("Verifier tools:     " + ", ".join(t["name"] for t in tools.tools_for("verifier", search_enabled)))
         rmap = repo.build_repo_map(root, files)
         click.echo(f"\nRepo map ({len(rmap)} chars), first 2000:\n")
         click.echo(rmap[:2000])
@@ -137,7 +143,19 @@ def audit(repo_, path_, model, service_tier, background, max_files, max_agents,
     else:
         click.echo(f"Cost:     rate not seeded for {model_id}/{service_tier} (see cost.RATES)")
     click.echo(f"Wall:     {wall:.1f}s")
-    click.echo(f"Saved to: {Path(output) / slug}")
+
+    d = Path(output) / slug
+    click.echo()
+    click.echo(f"Results written to {d}/")
+    click.echo("  report.md        triaged audit (human-readable)")
+    click.echo("  findings.json    findings + verifier verdicts (machine-readable)")
+    click.echo("  swarm-tree.json  agents the orchestrator spawned — roles, scopes, status")
+    click.echo("  summary.json     model, tier, tokens, cost, coverage")
+    click.echo()
+    click.echo("What to do with them:")
+    click.echo(f"  • Read the audit:     dw project run report   (or open {d / 'report.md'})")
+    click.echo(f"  • Findings for tools: jq '.[].title' {d / 'findings.json'}")
+    click.echo("  • Re-run differently: add --service-tier flex --background, or -m <model>")
 
 
 @cli.command()
@@ -161,8 +179,9 @@ def report(output):
                f"cost: {cost_str}  ·  {summary['wall_clock_s']}s")
     click.echo("=" * 64)
     click.echo((latest / "report.md").read_text())
+    click.echo(f"\nFull results in {latest}/  —  report.md · findings.json · swarm-tree.json · summary.json")
     if len(runs) > 1:
-        click.echo(f"\n({len(runs) - 1} older run(s) in {base})")
+        click.echo(f"({len(runs) - 1} older run(s) in {base})")
 
 
 @cli.command()
@@ -171,12 +190,15 @@ def report(output):
 @click.option("-m", "--model", default="k2.6", help="Model alias or full model_name")
 @click.option("--max-files", default=20, help="Cap on source files (smaller for a fair A/B)")
 @click.option("--max-agents", default=8, help="Cap on parallel workers")
+@click.option("--enable-search/--no-enable-search", default=None,
+              help="Web-search grounding tools (default: on iff SERPER_API_KEY is set)")
 @click.option("-o", "--output", default="results/", help="Output directory")
-def compare(repo_, path_, model, max_files, max_agents, output):
+def compare(repo_, path_, model, max_files, max_agents, enable_search, output):
     """Audit one repo in realtime (priority) and async (flex) tiers; write analysis.md."""
     if bool(repo_) == bool(path_):
         raise click.UsageError("provide exactly one of --repo or --path")
     model_id = _resolve_model(model)
+    search_enabled = enable_search if enable_search is not None else bool(os.environ.get("SERPER_API_KEY"))
     root, slug, files, dropped = _prepare(repo_, path_, max_files, output)
     client = R.make_client("doubleword")
     click.echo(f"Comparing tiers on {slug} ({len(files)} files), model {model_id}\n")
@@ -185,7 +207,8 @@ def compare(repo_, path_, model, max_files, max_agents, output):
     for tier, bg in [("priority", False), ("flex", True)]:
         click.echo(f"=== {tier} (background={bg}) ===")
         cfg = swarm.SwarmConfig(model=model_id, service_tier=tier, background=bg,
-                                max_files=max_files, max_agents=max_agents, verify=True)
+                                max_files=max_files, max_agents=max_agents, verify=True,
+                                search_enabled=search_enabled)
         t0 = time.time()
         res = swarm.run_audit(client, root, files, cfg,
                               on_event=lambda kind, msg: click.echo(f"  [{kind}] {msg}"))
@@ -202,7 +225,12 @@ def compare(repo_, path_, model, max_files, max_agents, output):
     out_path.mkdir(parents=True, exist_ok=True)
     (out_path / "analysis.md").write_text(md)
     click.echo(md)
-    click.echo(f"\nWrote {out_path / 'analysis.md'}")
+    click.echo()
+    click.echo(f"Comparison written to {out_path / 'analysis.md'}")
+    click.echo(f"Per-tier results in {Path(output) / (slug + '-priority')}/ and "
+               f"{Path(output) / (slug + '-flex')}/")
+    click.echo("  (each has its own report.md · findings.json · swarm-tree.json · summary.json)")
+    click.echo("Cost figures use the rate table — confirm real spend with `dw usage`.")
 
 
 def _comparison_md(slug, model, n_files, rows) -> str:

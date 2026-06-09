@@ -1,18 +1,21 @@
 [project]
-name = "kimi-swarm-audit"
+name = "swarm-audit"
 version = "0.1.0"
-description = "Kimi agent swarm code audit via Doubleword Open Responses API"
+description = "Doubleword agent swarm code audit via the Open Responses API"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1.0",
     "openai>=1.99.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]
+# Optional static analysers for run_sast (semgrep/ruff/gosec also work if on PATH).
+sast = ["bandit>=1.7.0"]
 
 [project.scripts]
-kimi-swarm-audit = "src.cli:main"
+swarm-audit = "src.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
@@ -20,3 +23,7 @@ packages = ["src"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# Only collect our own tests — never recurse into repos cloned under results/_repos.
+testpaths = ["tests"]

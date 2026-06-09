@@ -1,1 +1,1 @@
-"""Test suite for kimi-swarm-audit."""
+"""Test suite for swarm-audit."""

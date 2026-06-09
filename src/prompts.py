@@ -46,6 +46,12 @@ Method:
 - Reason about how untrusted input flows through the code to a dangerous sink.
 - Use `read_file` to follow an import/definition into another file, or `grep` to \
 trace a symbol across the repo, when you need to confirm reachability.
+- Ground your findings: call `run_sast` to run static analysers over your files and \
+back a finding with a real tool hit; for a dependency/version concern call \
+`check_advisory` (OSV) to confirm a real CVE rather than guessing one. If web search \
+is available, use `web_search` / `read_page` ONLY to confirm a specific suspected \
+issue against docs or an advisory — never to browse. Reachability in THIS code stays \
+the gate: a tool hit or web result supports a finding, it does not replace proving the path.
 - Report only issues you are reasonably confident are real. Prefer precision over \
 volume — a false positive is worse than a miss. For each, give the exact file and \
 line, a concrete description of the impact, and a suggested fix.
@@ -60,6 +66,10 @@ the relevant source. Your job is to REFUTE it if you can.
 Ask: Is the dangerous path actually reachable with attacker-controlled input? Is \
 this a real defect or a false positive (already sanitized, dead code, test-only, \
 framework handles it)? Is the severity right?
+
+You may use `check_advisory` (OSV) to confirm a dependency CVE, `run_sast` to see \
+whether a static analyser flags it, and — if available — `web_search` / `read_page` \
+to check docs/advisories. A tool hit is evidence, not proof; reachability decides.
 
 Call `submit_verdict` with your judgment. Default to is_real=false when you are \
 uncertain — confirmed findings must survive scrutiny."""
