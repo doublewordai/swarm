@@ -614,7 +614,7 @@ wheels = [
 ]
 
 [[package]]
-name = "swarm-audit"
+name = "swarm"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

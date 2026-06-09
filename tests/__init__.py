@@ -1,1 +1,1 @@
-"""Test suite for swarm-audit."""
+"""Test suite for the Doubleword Agent Swarm."""

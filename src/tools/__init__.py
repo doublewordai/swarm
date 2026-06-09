@@ -1,8 +1,10 @@
-"""Flat Open Responses tool schemas + local execution dispatch.
+"""Flat Open Responses tool schemas + execution dispatch.
 
-Three tools are *deferred* — handled by the swarm orchestrator, not here:
-``dispatch_workers`` (orchestrator), ``report_findings`` (worker terminal),
-``submit_verdict`` (verifier terminal). ``read_file``/``grep`` run immediately.
+Engine-handled (deferred) tools: ``dispatch_workers`` (orchestrator), ``submit_results``
+(worker terminal — its schema is per-brief, built by ``submit_results_tool``), and
+``submit_verdict`` (verifier terminal). The capability tools
+(``read_file``/``grep``/``run_sast``/``check_advisory``/``web_search``/``read_page``)
+run immediately. A brief selects which capability tools its workers/verifiers get.
 """
 
 import json
@@ -10,15 +12,15 @@ import json
 from . import advisory, repo, sast, search
 
 DEFERRED = "__DEFERRED__"
-_DEFERRED_NAMES = {"dispatch_workers", "report_findings", "submit_verdict"}
+_DEFERRED_NAMES = {"dispatch_workers", "submit_results", "submit_verdict"}
 
 DISPATCH_WORKERS = {
     "type": "function",
     "name": "dispatch_workers",
     "description": (
-        "Create parallel worker agents to audit the codebase. Each worker gets "
-        "ONLY its assigned files (pre-loaded) and returns its findings. Call this "
-        "once with the full team; you receive all findings when the wave completes."
+        "Create parallel worker agents. Each worker gets ONLY its assigned files "
+        "(pre-loaded) and returns its results. Call this once with the full team; you "
+        "receive all results when the wave completes."
     ),
     "parameters": {
         "type": "object",
@@ -28,8 +30,8 @@ DISPATCH_WORKERS = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "role": {"type": "string", "description": "short label, e.g. 'injection' or 'auth'"},
-                        "focus": {"type": "string", "description": "what this worker should look for"},
+                        "role": {"type": "string", "description": "short label, e.g. 'injection' or 'data-layer'"},
+                        "focus": {"type": "string", "description": "what this worker should do"},
                         "files": {"type": "array", "items": {"type": "string"},
                                   "description": "repo-relative files this worker owns"},
                     },
@@ -41,148 +43,90 @@ DISPATCH_WORKERS = {
     },
 }
 READ_FILE = {
-    "type": "function",
-    "name": "read_file",
-    "description": "Read one repo file (repo-relative path). Use to follow an import or read a file outside your slice.",
-    "parameters": {
-        "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"],
-    },
+    "type": "function", "name": "read_file",
+    "description": "Read one repo file (repo-relative path).",
+    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
 }
 GREP = {
-    "type": "function",
-    "name": "grep",
-    "description": "Regex search across the repo (or one file). Use to trace a value to its sink.",
-    "parameters": {
-        "type": "object",
-        "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
-        "required": ["pattern"],
-    },
+    "type": "function", "name": "grep",
+    "description": "Regex search across the repo (or one file).",
+    "parameters": {"type": "object",
+                   "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+                   "required": ["pattern"]},
 }
-REPORT_FINDINGS = {
-    "type": "function",
-    "name": "report_findings",
-    "description": "Submit your findings and finish. Return findings only — no other commentary.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
-                        "title": {"type": "string"},
-                        "file": {"type": "string"},
-                        "line": {"type": "integer"},
-                        "description": {"type": "string"},
-                        "suggested_fix": {"type": "string"},
-                        "confidence": {"type": "number"},
-                    },
-                    "required": ["severity", "title", "file", "description", "confidence"],
-                },
-            }
-        },
-        "required": ["findings"],
-    },
-}
-SUBMIT_VERDICT = {
-    "type": "function",
-    "name": "submit_verdict",
-    "description": "Confirm or refute the finding you were given. Default is_real=false when uncertain.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "is_real": {"type": "boolean"},
-            "confidence": {"type": "number"},
-            "adjusted_severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
-            "reasoning": {"type": "string"},
-        },
-        "required": ["is_real", "confidence", "reasoning"],
-    },
-}
-
 RUN_SAST = {
-    "type": "function",
-    "name": "run_sast",
-    "description": (
-        "Run static analysers (bandit / semgrep / ruff / gosec, whichever are installed) "
-        "over a path and return their hits. Read-only — never modifies the repo. Use it to "
-        "back a finding with a real tool hit rather than only your own judgment."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {"path": {"type": "string",
-                                "description": "repo-relative file or dir (optional; default: whole repo)"}},
-    },
+    "type": "function", "name": "run_sast",
+    "description": ("Run static analysers (bandit/semgrep/ruff/gosec, whichever are installed) "
+                    "over a path and return their hits. Read-only — never modifies the repo."),
+    "parameters": {"type": "object",
+                   "properties": {"path": {"type": "string",
+                                           "description": "repo-relative file/dir (optional; default whole repo)"}}},
 }
 CHECK_ADVISORY = {
-    "type": "function",
-    "name": "check_advisory",
-    "description": (
-        "Look up known vulnerabilities for a dependency on OSV.dev. Use for dependency / "
-        "version findings instead of guessing a CVE number."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "ecosystem": {"type": "string", "description": "e.g. PyPI, npm, Go, crates.io, Maven"},
-            "package": {"type": "string"},
-            "version": {"type": "string"},
-        },
-        "required": ["ecosystem", "package"],
-    },
+    "type": "function", "name": "check_advisory",
+    "description": "Look up known vulnerabilities for a dependency on OSV.dev.",
+    "parameters": {"type": "object",
+                   "properties": {"ecosystem": {"type": "string", "description": "e.g. PyPI, npm, Go, crates.io"},
+                                  "package": {"type": "string"}, "version": {"type": "string"}},
+                   "required": ["ecosystem", "package"]},
 }
 WEB_SEARCH = {
-    "type": "function",
-    "name": "web_search",
-    "description": (
-        "Targeted web search to ground a SPECIFIC suspected issue against docs/advisories. "
-        "Not for open-ended browsing."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {"query": {"type": "string"},
-                       "max_results": {"type": "integer", "description": "default 5"}},
-        "required": ["query"],
-    },
+    "type": "function", "name": "web_search",
+    "description": "Targeted web search to ground a SPECIFIC question against docs/advisories. Not for browsing.",
+    "parameters": {"type": "object",
+                   "properties": {"query": {"type": "string"},
+                                  "max_results": {"type": "integer", "description": "default 5"}},
+                   "required": ["query"]},
 }
 READ_PAGE = {
-    "type": "function",
-    "name": "read_page",
-    "description": "Fetch one web page as text (e.g. an advisory or doc) to confirm a finding.",
-    "parameters": {
-        "type": "object",
-        "properties": {"url": {"type": "string"}},
-        "required": ["url"],
-    },
+    "type": "function", "name": "read_page",
+    "description": "Fetch one web page as text (e.g. an advisory or doc).",
+    "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+}
+SUBMIT_VERDICT = {
+    "type": "function", "name": "submit_verdict",
+    "description": "Confirm or refute the item you were given. Default is_real=false when uncertain.",
+    "parameters": {"type": "object",
+                   "properties": {"is_real": {"type": "boolean"}, "confidence": {"type": "number"},
+                                  "adjusted_severity": {"type": "string"}, "reasoning": {"type": "string"}},
+                   "required": ["is_real", "confidence", "reasoning"]},
 }
 
-# Per-role read-only toolsets. web_search/read_page are opt-in (search_enabled);
-# the orchestrator's role/focus steers which tools each worker actually leans on.
-_WORKER_TOOLS = [READ_FILE, GREP, RUN_SAST, CHECK_ADVISORY]
-_VERIFIER_TOOLS = [CHECK_ADVISORY, RUN_SAST]
-_SEARCH_TOOLS = [WEB_SEARCH, READ_PAGE]
+# Brief-selectable capability tools by name. web_search/read_page are opt-in (search_enabled).
+_REGISTRY = {"read_file": READ_FILE, "grep": GREP, "run_sast": RUN_SAST,
+             "check_advisory": CHECK_ADVISORY, "web_search": WEB_SEARCH, "read_page": READ_PAGE}
+_SEARCH_ONLY = {"web_search", "read_page"}
 
 
-def tools_for(role: str, search_enabled: bool = False) -> list[dict]:
-    """Flat tool schemas for a swarm role. web_search/read_page only when search_enabled."""
+def submit_results_tool(result_key: str, item_schema: dict, description: str) -> dict:
+    """Build the per-brief worker terminal tool. The worker emits a list of result items."""
+    return {
+        "type": "function", "name": "submit_results", "description": description,
+        "parameters": {"type": "object",
+                       "properties": {result_key: {"type": "array", "items": item_schema}},
+                       "required": [result_key]},
+    }
+
+
+def tools_for(role: str, *, worker_tools=(), verifier_tools=(), search_enabled=False,
+              results_tool=None) -> list[dict]:
+    """Assemble the flat tool schemas for a role from brief-selected capability names."""
     if role == "orchestrator":
         return [DISPATCH_WORKERS]
-    extra = _SEARCH_TOOLS if search_enabled else []
+
+    def pick(names):
+        return [_REGISTRY[n] for n in names
+                if n in _REGISTRY and not (n in _SEARCH_ONLY and not search_enabled)]
+
     if role == "worker":
-        return _WORKER_TOOLS + extra + [REPORT_FINDINGS]
+        return pick(worker_tools) + ([results_tool] if results_tool else [])
     if role == "verifier":
-        return _VERIFIER_TOOLS + extra + [SUBMIT_VERDICT]
+        return pick(verifier_tools) + [SUBMIT_VERDICT]
     raise KeyError(role)
 
 
 def execute_tool(name: str, arguments: str, *, root: str) -> str:
-    """Execute an immediate tool; deferred tools return the DEFERRED sentinel.
-
-    Returns a JSON string for immediate tools (read_file/grep).
-    """
+    """Execute an immediate capability tool; deferred tools return the DEFERRED sentinel."""
     if name in _DEFERRED_NAMES:
         return DEFERRED
     try:
@@ -191,11 +135,9 @@ def execute_tool(name: str, arguments: str, *, root: str) -> str:
         return json.dumps({"error": f"bad arguments: {exc}"})
 
     if name == "read_file":
-        path = args.get("path", "")
-        return json.dumps({"path": path, "content": repo.read_file(root, path)})
+        return json.dumps({"path": args.get("path", ""), "content": repo.read_file(root, args.get("path", ""))})
     if name == "grep":
-        hits = repo.grep(root, args.get("pattern", ""), args.get("path"))
-        return json.dumps({"hits": hits})
+        return json.dumps({"hits": repo.grep(root, args.get("pattern", ""), args.get("path"))})
     if name == "run_sast":
         return json.dumps(sast.run_sast(root, args.get("path")))
     if name == "check_advisory":

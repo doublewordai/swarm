@@ -1,6 +1,6 @@
 [project]
-name = "swarm-audit"
-setup = "uv sync"
+name = "swarm"
+setup = "uv sync --extra sast"
 workflow = [
     "dw project setup",
     "dw project run audit -- --repo psf/requests --max-files 20",
@@ -8,13 +8,17 @@ workflow = [
 ]
 
 [steps.audit]
-description = "Run the Doubleword agent swarm to audit a codebase"
-run = "uv run swarm-audit audit"
+description = "Run the audit brief — find bugs / security issues in a codebase"
+run = "uv run swarm run audit"
+
+[steps.onboarding]
+description = "Run the onboarding brief — document a codebase's subsystems"
+run = "uv run swarm run onboarding"
 
 [steps.report]
-description = "Print the latest audit report"
-run = "uv run swarm-audit report"
+description = "Print the latest run's report"
+run = "uv run swarm report"
 
 [steps.compare]
-description = "Audit one repo in realtime and async tiers; write analysis.md"
-run = "uv run swarm-audit compare"
+description = "Run a brief in realtime and async tiers; write analysis.md"
+run = "uv run swarm compare"
