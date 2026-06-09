@@ -1,0 +1,20 @@
+[project]
+name = "kimi-swarm-audit"
+setup = "uv sync"
+workflow = [
+    "dw project setup",
+    "dw project run audit -- --repo psf/requests --max-files 20",
+    "dw project run report",
+]
+
+[steps.audit]
+description = "Run the Kimi agent swarm to audit a codebase"
+run = "uv run kimi-swarm-audit audit"
+
+[steps.report]
+description = "Print the latest audit report"
+run = "uv run kimi-swarm-audit report"
+
+[steps.compare]
+description = "Audit one repo in realtime and async tiers; write analysis.md"
+run = "uv run kimi-swarm-audit compare"
