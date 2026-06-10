@@ -65,7 +65,8 @@ class SwarmConfig:
     max_rounds: int = 3                  # tool rounds per worker/verifier (+1 forced submit)
     max_files_per_worker: int = 30       # oversized specs are split engine-side
     worker_context_chars: int = 200_000  # preload budget per worker (~50k tokens)
-    map_max_chars: int = 200_000         # repo-map budget for the orchestrator
+    map_max_chars: int = 80_000          # repo-map budget (~20k tok) — big repos go tree-only
+    orchestrator_max_output_tokens: int = 16384  # room to emit a full team in one turn
     verify: bool = True
     verify_votes: int = 1                # verifiers per item; majority decides
     orchestrator_temperature: float = 0.3
@@ -157,6 +158,27 @@ def _validate_items(raw, schema: dict) -> tuple[list[dict], int]:
         except jsonschema.ValidationError:
             dropped += 1
     return valid, dropped
+
+
+def _expand_spec_files(all_files: list[str], explicit_files, paths) -> list[str]:
+    """Resolve a worker's file set from explicit files plus directory/prefix `paths`.
+
+    Lets the orchestrator decompose a large repo by directory ("paths": ["src/auth"])
+    instead of enumerating every file — a handful of lines of output instead of
+    hundreds. Returns files in repo order, deduped.
+    """
+    wanted = set(explicit_files or [])
+    available = set(all_files)
+    for p in (paths or []):
+        p = (p or "").strip().strip("/")
+        if not p:
+            continue
+        if p in available:
+            wanted.add(p)
+        else:
+            prefix = p + "/"
+            wanted.update(f for f in all_files if f.startswith(prefix))
+    return [f for f in all_files if f in wanted]
 
 
 def _split_specs(specs: list[dict], max_files: int) -> list[dict]:
@@ -406,6 +428,7 @@ def _orchestrator_agent(brief: Brief, cfg: SwarmConfig, repo_map: str, n_files: 
 def _orch_turn(client, orch: Agent, otools, cfg, tokens, steps) -> dict:
     resp = _dispatch(client, [_req(cfg.model, orch.input_items, tools_=otools,
                                    temperature=cfg.orchestrator_temperature,
+                                   max_output_tokens=cfg.orchestrator_max_output_tokens,
                                    reasoning_effort=cfg.reasoning_effort)], cfg)[0]
     _add_tokens(tokens, resp, cfg.model)
     orch.rounds += 1
@@ -443,6 +466,8 @@ def _orchestrate_structured(client, root, brief, files, cfg, tokens, steps, ids,
                 specs = (json.loads(fc["arguments"] or "{}")).get("workers", [])
             except json.JSONDecodeError:
                 specs = []
+            for s in specs:
+                s["files"] = _expand_spec_files(files, s.get("files"), s.get("paths"))
             specs = _split_specs(specs, cfg.max_files_per_worker)
             budget = cfg.max_agents - _count_workers(agents)
             if len(specs) > budget:
@@ -518,7 +543,7 @@ def _orchestrate_kimi(client, root, brief, files, cfg, tokens, steps, ids, agent
                 _tool_output(orch, fc["call_id"], json.dumps(
                     {"error": f"agent budget exhausted ({cfg.max_agents}) — synthesize with what you have"}))
                 continue
-            task_files = args.get("files") or []
+            task_files = _expand_spec_files(files, args.get("files"), args.get("paths"))
             specs.append({"role": name, "focus": (args.get("prompt") or "")[:120],
                           "files": task_files, "_fc": fc["call_id"],
                           "_system_prompt": subagents[name] + _kimi_contract(brief),

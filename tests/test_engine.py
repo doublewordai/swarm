@@ -440,3 +440,60 @@ def test_kimi_unknown_agent_gets_error_and_zero_workers_raises(monkeypatch, tmp_
     outputs = [i for i in captured[1][0]["input_items"]
                if i.get("type") == "function_call_output"]
     assert any("unknown agent" in o["output"] for o in outputs)
+
+
+# --- large-repo scalability: compact input, directory-level decomposition -----
+
+
+def test_dispatch_workers_paths_expand_to_files(monkeypatch, tmp_path):
+    (tmp_path / "auth").mkdir()
+    (tmp_path / "db").mkdir()
+    (tmp_path / "auth" / "login.py").write_text("x = 1\n")
+    (tmp_path / "auth" / "session.py").write_text("x = 1\n")
+    (tmp_path / "db" / "models.py").write_text("x = 1\n")
+    files = ["auth/login.py", "auth/session.py", "db/models.py"]
+    captured = _capture(monkeypatch, [
+        # orchestrator assigns a DIRECTORY, not every file
+        [_fc("dispatch_workers", {"workers": [{"role": "auth", "focus": "f", "paths": ["auth"]}]})],
+        [_fc("submit_results", {"sections": []})],
+        [_text("done")],
+        [_text("# Guide")],
+    ])
+    res = engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), files,
+                           engine.SwarmConfig(model="m"))
+    worker = next(a for a in res["agents"] if a["role"] == "worker")
+    assert set(worker["meta"]["files"]) == {"auth/login.py", "auth/session.py"}
+    assert res["coverage"]["assigned"] == 2
+
+
+def test_orchestrator_gets_larger_output_budget_than_workers(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = _capture(monkeypatch, [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"sections": []})],
+        [_text("done")],
+        [_text("# Guide")],
+    ])
+    engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m"))
+    orch_budget = captured[0][0]["max_output_tokens"]
+    worker_budget = captured[1][0]["max_output_tokens"]
+    assert orch_budget > worker_budget
+    assert orch_budget >= 16384
+
+
+def test_default_map_budget_bounds_orchestrator_input(tmp_path):
+    # The orchestrator's repo map is bounded by default (it must not balloon to a
+    # 48k-token header-for-every-file dump that times out the call), yet still
+    # names every file so nothing is invisible to decomposition.
+    from src.tools import repo
+    budget = engine.SwarmConfig(model="m").map_max_chars
+    assert budget <= 100_000
+    body = "\n".join(f"line_{i} = {i}  # padding to make files large" for i in range(120))
+    for i in range(300):
+        (tmp_path / f"m{i:03}.py").write_text(body + "\n")
+    files = repo.list_source_files(str(tmp_path))
+    m = repo.build_repo_map(str(tmp_path), files, max_chars=budget)
+    assert len(m) <= budget             # bounded input
+    assert all(f in m for f in files)   # every file still listed
+    assert "line_0 " not in m           # large repo degraded away from full headers

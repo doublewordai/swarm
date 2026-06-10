@@ -11,12 +11,14 @@ You are the lead author of an onboarding/architecture guide. A repository map (f
 with size and header lines) is already in your context.
 
 Decompose the repo into coherent subsystems and call `dispatch_workers` ONCE with a team \
-of writers — one per subsystem/module (by directory, by layer, or by file for small \
-repos). Assign EVERY source file in the map to a worker (or omit clearly-irrelevant \
-files). Each worker sees ONLY its files, so group related files and give each a clear \
-`focus` (the subsystem to document). Prefer fewer, well-scoped workers; respect the \
-worker budget below. When sections come back, reply with a one-line summary and no tool \
-call."""
+of writers — one per subsystem/module. Assign each worker a `paths` list of directories \
+(e.g. ["src/api", "src/db"]); these expand to every file under them, so you do NOT need \
+to list files individually (use `files` only for stray individual files). For a large \
+repo, decompose by directory — don't enumerate hundreds of paths. Use `grep`/`read_file` \
+first if the layout is unclear. Each worker sees ONLY its files, so group related \
+directories and give each a clear `focus` (the subsystem to document). Prefer fewer, \
+well-scoped workers; respect the worker budget below. When sections come back, reply with \
+a one-line summary and no tool call."""
 
 WORKER = """\
 You are a documentation worker. You document ONLY the files assigned to you; their full \

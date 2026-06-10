@@ -37,7 +37,8 @@ swarm run <brief> --repo owner/name
         │   degrades (headers → tree → truncated) to fit the orchestrator's context budget
         ▼
    Orchestrator (LLM): decomposes the task + designs the team — picks strategy and width
-        │   itself; can read_file/grep to probe before deciding whether/how to parallelize.
+        │   itself; assigns work by directory (paths, expanded engine-side) so a 500-file
+        │   repo is a handful of lines, not 500; can read_file/grep to probe first.
         ├─ Worker 0  scope: …  ─┐ bounded local context: its files pre-loaded (within a
         ├─ Worker 1  scope: …   │ char budget; the rest listed as fetchable), own memory —
         └─ Worker K  scope: …  ─┘ returns ONLY schema-valid results. A forced final submit
@@ -213,7 +214,8 @@ full `model_name` Doubleword serves — Kimi K2.6 is just the default, not a har
   `--worker-model` (cheap workers, strong orchestrator/synthesizer — the runtime analogue
   of the paper's "train the orchestrator with small sub-agents first").
 - **Tiers:** `--service-tier priority|flex` · `--background/--no-background` ·
-  `--max-concurrent` (in-flight requests per dispatch).
+  `--max-concurrent` (in-flight requests per dispatch) · `--timeout` (per-request
+  seconds; raise for very large orchestrator turns).
 - **Budgets:** `--max-files` (skipped files logged) · `--max-agents` (total workers) ·
   `--max-waves` · `--max-steps` (orchestrator turns) · `--max-rounds` (tool rounds per
   worker/verifier) · `--max-files-per-worker` (oversized specs split engine-side).
@@ -262,8 +264,10 @@ submit/verdict turns, the vote panel, context budgets, and the step accounting.
 ## Limitations & notes
 
 - **Reasoning latency:** K2.6 reasons; even at `reasoning.effort=minimal` each call is
-  tens of seconds, so a swarm takes minutes. A request timeout fails a stalled call
-  gracefully rather than hanging the run.
+  tens of seconds, so a swarm takes minutes. The orchestrator's decomposition turn is the
+  heaviest call — the repo map is capped (`map_max_chars`, big repos go tree-only) and the
+  orchestrator assigns by directory rather than enumerating files, to keep that turn small.
+  `--timeout` (default 600s) bounds a stalled call; raise it for very large repos.
 - **Cost figures are a guide:** computed from the API's reported token usage (per model);
   treat `dw usage` as the source of truth for actual spend.
 - **Read-only:** results include suggestions as text; nothing is applied or executed.

@@ -44,8 +44,11 @@ ASSIGN_TASK = {
         "properties": {
             "agent": {"type": "string", "description": "Specify which created agent to use."},
             "prompt": {"type": "string", "description": "The task for the agent to perform"},
+            "paths": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional repo-relative directories to preload "
+                                     "(expanded to all files under them)"},
             "files": {"type": "array", "items": {"type": "string"},
-                      "description": "Optional repo-relative files to preload into the agent's context"},
+                      "description": "Optional specific repo-relative files to preload into the agent's context"},
         },
         "required": ["agent", "prompt"],
     },
@@ -69,10 +72,15 @@ DISPATCH_WORKERS = {
                     "properties": {
                         "role": {"type": "string", "description": "short label, e.g. 'injection' or 'data-layer'"},
                         "focus": {"type": "string", "description": "what this worker should do"},
+                        "paths": {"type": "array", "items": {"type": "string"},
+                                  "description": "repo-relative directories this worker owns "
+                                                 "(e.g. 'src/auth') — expanded to all files under them. "
+                                                 "Prefer this over listing files for large repos."},
                         "files": {"type": "array", "items": {"type": "string"},
-                                  "description": "repo-relative files this worker owns"},
+                                  "description": "specific repo-relative files this worker owns "
+                                                 "(use for individual files; combine with paths)"},
                     },
-                    "required": ["role", "focus", "files"],
+                    "required": ["role", "focus"],
                 },
             }
         },
