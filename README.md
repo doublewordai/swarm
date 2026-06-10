@@ -213,16 +213,38 @@ dw project run audit -- --repo psf/requests --dry-run           # plan only, no 
 
 Or directly: `swarm run audit --repo … `, `swarm run onboarding --path …`, `swarm briefs`.
 
-### The model is a runtime parameter
+### Provider & model are runtime parameters
+
+`--provider` (default `doubleword`) selects the API endpoint and key env var; every
+provider must serve the Open Responses API (`/v1/responses`):
+
+| `--provider` | Base URL | API key env |
+|--------------|----------|-------------|
+| `doubleword` | `https://api.doubleword.ai/v1` | `DOUBLEWORD_API_KEY` |
+| `openai`     | `https://api.openai.com/v1`    | `OPENAI_API_KEY` |
 
 `--model` defaults to `moonshotai/Kimi-K2.6` and accepts an alias (`k2.6`, `k2.5`) or any
-full `model_name` Doubleword serves — Kimi K2.6 is just the default, not a hard dependency.
+full `model_name`. **Aliases are Doubleword model names**; with another provider pass that
+provider's own id (e.g. `--provider openai -m gpt-5.2`) — the CLI requires an explicit
+`-m` there rather than sending a Doubleword alias to the wrong endpoint.
+
+```bash
+export OPENAI_API_KEY=sk-...
+swarm run audit --repo psf/requests --provider openai -m gpt-5.2 --temperature none
+```
+
+OpenAI's gpt-5-class reasoning models reject `temperature` and use `reasoning.effort`;
+`--temperature none` omits the parameter, and `--reasoning-effort minimal|low|medium|high`
+(or `none` to omit) sets the depth. Both apply to every role (orchestrator, workers,
+verifiers, synthesizer).
 
 ### Useful flags
 
-- **Interface & models:** `--interface structured|kimi` · `-m/--model` ·
+- **Provider & models:** `--provider doubleword|openai` · `-m/--model` ·
   `--worker-model` (cheap workers, strong orchestrator/synthesizer — the runtime analogue
   of the paper's "train the orchestrator with small sub-agents first").
+- **Request params:** `--reasoning-effort minimal|low|medium|high|none` ·
+  `--temperature <float>|none` (omit for models that reject it).
 - **Tiers:** `--service-tier priority|flex` · `--background/--no-background` ·
   `--max-concurrent` (in-flight requests per dispatch) · `--timeout` (per-request
   seconds; raise for very large orchestrator turns).

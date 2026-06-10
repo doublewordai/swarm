@@ -171,3 +171,89 @@ def test_vv_shows_tool_calls(tmp_path, monkeypatch):
 def test_v_not_shown_tool_calls(tmp_path, monkeypatch):
     r = _invoke(tmp_path, monkeypatch, ["-v"])
     assert "grep" not in r.output             # tool tracing is -vv only
+
+
+def test_provider_openai_flows_to_make_client(tmp_path, monkeypatch):
+    from src import responses as R
+    seen = {}
+
+    def fake_make_client(provider="doubleword", timeout=600.0):
+        seen["provider"] = provider
+        return object()
+
+    monkeypatch.setattr(R, "make_client", fake_make_client)
+    monkeypatch.setattr("src.cli.engine.run_swarm", lambda *a, **k: _fake_res([]))
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--provider", "openai", "-m", "gpt-5.2",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["provider"] == "openai"
+
+
+def test_provider_openai_requires_explicit_model(tmp_path):
+    # The default model is a Doubleword alias; refusing to guess an OpenAI model
+    # beats sending "k2.6" to api.openai.com.
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--provider", "openai", "--dry-run",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code != 0
+    assert "-m" in r.output or "--model" in r.output
+
+
+def test_model_alias_not_remapped_for_openai(tmp_path, monkeypatch):
+    from src import responses as R
+    seen = {}
+    monkeypatch.setattr(R, "make_client", lambda provider="doubleword", timeout=600.0: object())
+
+    def capture(client, b, root, files, cfg, **k):
+        seen["model"] = cfg.model
+        return _fake_res([])
+
+    monkeypatch.setattr("src.cli.engine.run_swarm", capture)
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--provider", "openai", "-m", "gpt-5.2",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["model"] == "gpt-5.2"
+
+
+def test_reasoning_effort_and_temperature_flags_reach_config(tmp_path, monkeypatch):
+    from src import responses as R
+    seen = {}
+    monkeypatch.setattr(R, "make_client", lambda provider="doubleword", timeout=600.0: object())
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+
+    def capture(client, b, root, files, cfg, **k):
+        seen["effort"] = cfg.reasoning_effort
+        seen["temp"] = cfg.temperature
+        return _fake_res([])
+
+    monkeypatch.setattr("src.cli.engine.run_swarm", capture)
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--reasoning-effort", "high", "--temperature", "0.7",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["effort"] == "high"
+    assert seen["temp"] == 0.7
+
+
+def test_none_values_omit_params(tmp_path, monkeypatch):
+    # gpt-5-class reasoning models reject temperature; non-reasoning models reject
+    # reasoning.effort — "none" must mean "omit the parameter", not "send null".
+    from src import responses as R
+    seen = {}
+    monkeypatch.setattr(R, "make_client", lambda provider="doubleword", timeout=600.0: object())
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+
+    def capture(client, b, root, files, cfg, **k):
+        seen["effort"] = cfg.reasoning_effort
+        seen["temp"] = cfg.temperature
+        return _fake_res([])
+
+    monkeypatch.setattr("src.cli.engine.run_swarm", capture)
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--reasoning-effort", "none", "--temperature", "none",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["effort"] is None
+    assert seen["temp"] == "omit"

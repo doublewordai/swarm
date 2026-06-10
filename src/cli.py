@@ -23,8 +23,10 @@ MODEL_ALIASES = {"k2.6": "moonshotai/Kimi-K2.6", "k2.5": "moonshotai/Kimi-K2.5"}
 DEFAULT_MODEL = "moonshotai/Kimi-K2.6"
 
 
-def _resolve_model(m: str) -> str:
-    return MODEL_ALIASES.get(m, m)
+def _resolve_model(m: str, provider: str = "doubleword") -> str:
+    # Aliases name Doubleword model_names; other providers use their own ids, so
+    # pass the model through verbatim there (e.g. gpt-5.2 on openai).
+    return MODEL_ALIASES.get(m, m) if provider == "doubleword" else m
 
 
 def _resolve_brief(name: str):
@@ -112,9 +114,22 @@ def _write_results(output, slug, brief, res, cfg, wall) -> dict:
     return summary
 
 
+def _parse_temperature(raw):
+    """CLI --temperature → cfg.temperature: None (role defaults) | float | "omit"."""
+    if raw is None:
+        return None
+    if raw.strip().lower() in ("none", "omit"):
+        return "omit"
+    try:
+        return float(raw)
+    except ValueError:
+        raise click.UsageError(f"--temperature must be a number or 'none', got {raw!r}")
+
+
 def _make_cfg(model_id, worker_model_id, interface, service_tier, background, max_files,
               max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
-              max_concurrent, verify_votes, no_verify, search_enabled):
+              max_concurrent, verify_votes, no_verify, search_enabled,
+              reasoning_effort, temperature):
     return engine.SwarmConfig(
         model=model_id, worker_model=worker_model_id, interface=interface,
         service_tier=service_tier, background=background, max_files=max_files,
@@ -122,6 +137,8 @@ def _make_cfg(model_id, worker_model_id, interface, service_tier, background, ma
         max_rounds=max_rounds, max_files_per_worker=max_files_per_worker,
         max_concurrent=max_concurrent, verify_votes=verify_votes,
         verify=not no_verify, search_enabled=search_enabled,
+        reasoning_effort=(None if reasoning_effort == "none" else reasoning_effort),
+        temperature=_parse_temperature(temperature),
     )
 
 
@@ -142,9 +159,15 @@ def briefs():
 @click.argument("brief")
 @click.option("--repo", "repo_", default=None, help="GitHub repo 'owner/name' (shallow-cloned)")
 @click.option("--path", "path_", default=None, help="Local directory to work over")
+@click.option("--provider", type=click.Choice(sorted(R.PROVIDERS)), default="doubleword",
+              help="API provider (also sets base URL + API-key env var)")
 @click.option("-m", "--model", default="k2.6", help="Model alias (k2.6, k2.5) or full model_name")
 @click.option("--worker-model", default=None,
               help="Model for workers/verifiers (cheap workers, strong orchestrator). Default: --model")
+@click.option("--reasoning-effort", type=click.Choice(["minimal", "low", "medium", "high", "none"]),
+              default="minimal", help="Reasoning depth; 'none' omits the param (non-reasoning models)")
+@click.option("--temperature", default=None,
+              help="Sampling temperature (number), or 'none' to omit it (gpt-5-class models reject it)")
 @click.option("--interface", type=click.Choice(["structured", "kimi"]), default="structured",
               help="structured (dispatch_workers) or kimi (create_subagent/assign_task, K2.5 §E.8)")
 @click.option("--service-tier", type=click.Choice(["priority", "flex"]), default="priority")
@@ -167,15 +190,20 @@ def briefs():
 @click.option("-v", "--verbose", count=True,
               help="-v: per-call timing/tokens + dispatch plan + live failures. -vv: + tool calls")
 @click.option("--dry-run", is_flag=True, help="Build & print the plan; no API calls")
-def run(brief, repo_, path_, model, worker_model, interface, service_tier, background,
-        max_files, max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
-        max_concurrent, timeout, verify_votes, no_verify, enable_search, output, verbose, dry_run):
+def run(brief, repo_, path_, provider, model, worker_model, reasoning_effort, temperature,
+        interface, service_tier, background, max_files, max_agents, max_waves, max_steps,
+        max_rounds, max_files_per_worker, max_concurrent, timeout, verify_votes, no_verify,
+        enable_search, output, verbose, dry_run):
     """Run a BRIEF over a repo/path (see `swarm briefs`)."""
     if bool(repo_) == bool(path_):
         raise click.UsageError("provide exactly one of --repo or --path")
+    if provider != "doubleword" and model == "k2.6":
+        raise click.UsageError(
+            f"--model is required for provider '{provider}' (the default 'k2.6' is a "
+            f"Doubleword alias). Pass -m/--model with that provider's model id.")
     b = _resolve_brief(brief)
-    model_id = _resolve_model(model)
-    worker_model_id = _resolve_model(worker_model) if worker_model else None
+    model_id = _resolve_model(model, provider)
+    worker_model_id = _resolve_model(worker_model, provider) if worker_model else None
     if background is None:
         background = service_tier == "flex"
     search_enabled = enable_search if enable_search is not None else bool(os.environ.get("SERPER_API_KEY"))
@@ -184,9 +212,11 @@ def run(brief, repo_, path_, model, worker_model, interface, service_tier, backg
     out_slug = f"{b.name}-{slug}"
     cfg = _make_cfg(model_id, worker_model_id, interface, service_tier, background, max_files,
                     max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
-                    max_concurrent, verify_votes, no_verify, search_enabled)
+                    max_concurrent, verify_votes, no_verify, search_enabled,
+                    reasoning_effort, temperature)
     click.echo(f"Brief:   {b.name} — {b.description}")
-    click.echo(f"Model:   {model_id}" + (f"  (workers: {worker_model_id})" if worker_model_id else ""))
+    click.echo(f"Model:   {model_id}  (provider: {provider})"
+               + (f"  (workers: {worker_model_id})" if worker_model_id else ""))
     click.echo(f"Target:  {slug}  ({len(files)} source files)")
     click.echo(f"Mode:    {interface} interface · tier {service_tier} (background={background})")
     if dropped:
@@ -210,7 +240,7 @@ def run(brief, repo_, path_, model, worker_model, interface, service_tier, backg
         click.echo(rmap[:2000])
         return
 
-    client = R.make_client("doubleword", timeout=timeout)
+    client = R.make_client(provider, timeout=timeout)
     t0 = time.time()
     try:
         res = engine.run_swarm(client, b, root, files, cfg, on_event=_event_printer(verbose))
