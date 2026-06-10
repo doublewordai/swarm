@@ -685,3 +685,45 @@ def test_temperature_default_keeps_role_defaults(monkeypatch, tmp_path):
                      engine.SwarmConfig(model="m"))
     assert captured[0][0]["temperature"] == 0.3   # orchestrator
     assert captured[1][0]["temperature"] == 0     # worker
+
+
+# --- reasoning-model item linkage (OpenAI gpt-5: reasoning <-> function_call) --
+
+
+def test_echo_replays_reasoning_item_before_its_function_call():
+    # OpenAI rejects a function_call echoed back without its linked reasoning item.
+    a = engine.Agent(id="orchestrator", role="orchestrator", model="m")
+    resp = {"output": [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "ENC"},
+        {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+         "name": "dispatch_workers", "arguments": "{}"},
+    ]}
+    engine._echo_outputs(a, resp)
+    assert [it["type"] for it in a.input_items] == ["reasoning", "function_call"]
+    assert a.input_items[0]["id"] == "rs_1"
+    assert a.input_items[0]["encrypted_content"] == "ENC"   # replayable content kept
+    assert a.input_items[1]["id"] == "fc_1"                 # fc id kept → links to rs_1
+
+
+def test_echo_preserves_output_order_with_text_and_reasoning():
+    a = engine.Agent(id="x", role="orchestrator", model="m")
+    resp = {"output": [
+        {"type": "reasoning", "id": "rs_1", "summary": []},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
+        {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "f", "arguments": "{}"},
+    ]}
+    engine._echo_outputs(a, resp)
+    assert [it["type"] for it in a.input_items] == ["reasoning", "message", "function_call"]
+    assert a.input_items[1]["content"] == "hi"
+
+
+def test_echo_drops_idless_reasoning_summary():
+    # Kimi-style reasoning summaries carry no id (nothing to link/replay) → skip,
+    # preserving the prior behaviour for non-OpenAI providers.
+    a = engine.Agent(id="x", role="worker", model="m")
+    resp = {"output": [
+        {"type": "reasoning", "summary": []},
+        {"type": "function_call", "id": "fc", "call_id": "c", "name": "f", "arguments": "{}"},
+    ]}
+    engine._echo_outputs(a, resp)
+    assert [it["type"] for it in a.input_items] == ["function_call"]

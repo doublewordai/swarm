@@ -253,18 +253,37 @@ def _add_tokens(acc: dict, resp: dict, model: str) -> None:
 
 
 def _echo_outputs(agent: Agent, resp: dict) -> None:
-    text = R.text_of(resp)
-    if text:
-        agent.input_items.append({"type": "message", "role": "assistant", "content": text})
+    """Append this turn's output to the next turn's input, in output order.
+
+    Reasoning models (OpenAI gpt-5 series) emit a ``reasoning`` item linked by id
+    to the ``function_call`` items that follow it; the Responses API rejects a
+    function_call echoed back without its reasoning item. So we replay output
+    items in their original order and keep id-bearing reasoning items verbatim
+    (with any replayable ``encrypted_content``), rather than reconstructing only
+    text + function_calls — which dropped the reasoning link and reordered turns.
+    Reasoning summaries with no id (e.g. Kimi's) carry no linkage and are skipped.
+    """
     for item in resp.get("output", []):
-        if item.get("type") != "function_call":
-            continue
-        echoed = {"type": "function_call",
-                  "call_id": item.get("call_id") or item.get("id", ""),
-                  "name": item.get("name", ""), "arguments": item.get("arguments", "")}
-        if item.get("id"):
-            echoed["id"] = item["id"]
-        agent.input_items.append(echoed)
+        t = item.get("type")
+        if t == "reasoning" and item.get("id"):
+            echoed = {"type": "reasoning", "id": item["id"]}
+            for k in ("summary", "encrypted_content", "content"):
+                if item.get(k) is not None:
+                    echoed[k] = item[k]
+            agent.input_items.append(echoed)
+        elif t == "message":
+            text = "".join(
+                c.get("text", "") for c in item.get("content", [])
+                if isinstance(c, dict) and c.get("type") in ("output_text", "text"))
+            if text:
+                agent.input_items.append({"type": "message", "role": "assistant", "content": text})
+        elif t == "function_call":
+            echoed = {"type": "function_call",
+                      "call_id": item.get("call_id") or item.get("id", ""),
+                      "name": item.get("name", ""), "arguments": item.get("arguments", "")}
+            if item.get("id"):
+                echoed["id"] = item["id"]
+            agent.input_items.append(echoed)
 
 
 def _tool_output(agent: Agent, call_id: str, output: str) -> None:
