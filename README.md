@@ -34,23 +34,46 @@ or sign up at [app.doubleword.ai](https://app.doubleword.ai).
 swarm run <brief> --repo owner/name
         │
    Repo map (code): shallow-clone → filter source files → compact tree + headers
-        │   "map-first": the orchestrator can decompose immediately, no wasted round
+        │   degrades (headers → tree → truncated) to fit the orchestrator's context budget
         ▼
-   Orchestrator (LLM): decomposes the task + designs the team — it picks the strategy
-        │   and width itself.   tool: dispatch_workers([{role, focus, files}])
-        ├─ Worker 0  scope: …  ─┐ bounded local context: only its files pre-loaded,
-        ├─ Worker 1  scope: …   │ own memory — returns ONLY results (the brief's schema)
-        └─ Worker K  scope: …  ─┘ worker tools come from the brief
+   Orchestrator (LLM): decomposes the task + designs the team — picks strategy and width
+        │   itself; can read_file/grep to probe before deciding whether/how to parallelize.
+        ├─ Worker 0  scope: …  ─┐ bounded local context: its files pre-loaded (within a
+        ├─ Worker 1  scope: …   │ char budget; the rest listed as fetchable), own memory —
+        └─ Worker K  scope: …  ─┘ returns ONLY schema-valid results. A forced final submit
+        │                         turn means an out-of-budget worker never loses its work.
+        ▼   route-back: per-worker status + unreported files → orchestrator may fill gaps
+   Dedupe → (optional) Verifier panel: N independent skeptics per item (majority vote),
+        │   each with its own tool loop. confirmed → kept · refuted → dropped (counted) ·
+        │   no verdict → kept but flagged "unverified" (never silently discarded).
         ▼
-   Dedupe → (optional) Verifier swarm: independent skeptics challenge each result
-        ▼
-   Synthesizer (1 call): reconcile results → report.md + <results>.json
+   Synthesizer (1 call): reconcile confirmed + unverified → report.md + <results>.json
 ```
 
 The loop is identical for every brief. A **brief** plugs in the prompts (orchestrator /
-worker / verifier / synthesis), the **result schema** the workers emit, which **tools**
-each role gets, and the dedupe/verify hooks. `audit` emits findings and verifies them;
-`onboarding` emits doc sections and skips verification.
+worker / verifier / synthesis), the **result schema** the workers emit (enforced —
+invalid items are dropped, not trusted), which **tools** each role gets, and the
+dedupe/verify hooks. `audit` emits findings and verifies them; `onboarding` emits doc
+sections and skips verification.
+
+### Two orchestration interfaces
+
+`--interface structured` (default) — the orchestrator calls `dispatch_workers([{role,
+focus, files}])` and the harness builds each worker's bounded context. Simple and
+predictable.
+
+`--interface kimi` — the interface Kimi K2.5/K2.6 were **RL-trained on** (K2.5 tech
+report, Appendix E.8): `create_subagent(name, system_prompt)` lets the orchestrator
+**author each specialist's system prompt** and register it for reuse, then
+`assign_task(agent, prompt, files?)` dispatches tasks — multiple calls in one turn run in
+parallel. The brief's result schema and submit contract are appended to the
+model-authored prompt, so output stays structured. This matches the PARL training
+distribution; the harness still enforces context bounds and schema validation.
+
+**Failure is loud.** A dead orchestrator call, or a run that dispatches zero workers,
+raises `SwarmError` and exits non-zero — it never ships a vacuous report. A failed
+synthesis writes the structured results and exits non-zero with a clear message; failed
+*workers* are surfaced as warnings (the run continues with partial coverage).
 
 ### Reimplementing Kimi's agent swarm on open weights
 
@@ -60,10 +83,26 @@ aggregation are **runtime scaffolding** that lives in Moonshot's hosted product,
 the open weights. On Doubleword we have the raw model behind the Open Responses API, so
 this harness *is* that scaffolding. It reproduces four principles:
 
-1. **Self-designing orchestrator** — the model chooses the team and the decomposition.
-2. **Bounded local context + route-back** — workers are isolated and return only results.
-3. **Structural anti-groupthink** — independent verifiers refute before reconciliation.
-4. **Synthesis** — one pass reconciles.
+1. **Self-designing orchestrator** — the model chooses the team and the decomposition,
+   and (`--interface kimi`) authors each sub-agent's system prompt via the trained
+   `create_subagent`/`assign_task` interface.
+2. **Bounded local context + route-back** — workers are isolated, preloaded within a
+   context budget, and return only schema-valid results; per-worker status routes back so
+   the orchestrator can fill gaps.
+3. **Structural anti-groupthink** — an independent verifier panel (majority vote) refutes
+   before reconciliation; unverified items are flagged, not dropped.
+4. **Synthesis** — one pass reconciles confirmed and unverified results.
+
+The orchestration *scaffolding* is ours; the verify/synthesis stages are additions on top
+of Kimi's design (the blog's "independent agents → forced reconciliation" is about
+perspective diversity, and the paper's orchestrator reconciles inline). What's faithful to
+the trained model is the `--interface kimi` tool surface and the bounded-context sharding.
+
+> **On parallelism (PARL):** the paper's orchestrator is RL-trained to decide *whether,
+> when, and how* to parallelize, optimizing a *critical-steps* objective (Σ over stages of
+> `main + max(sub)` steps). We don't train — but we **measure** it: every run reports
+> critical vs. total steps and the implied parallel speedup, so you can see the swarm's
+> decomposition the way the paper scores it.
 
 ## Briefs
 
@@ -108,8 +147,10 @@ next seam: a `Corpus` abstraction for "what the swarm works over." See the roadm
 
 ## Tools
 
-Engine tools (every brief): `dispatch_workers` (orchestrator), `submit_results`
-(worker terminal — schema is the brief's), `submit_verdict` (verifier terminal).
+Engine tools (every brief): `dispatch_workers` *or* `create_subagent`+`assign_task`
+(orchestrator, per `--interface`), `submit_results` (worker terminal — schema is the
+brief's), `submit_verdict` (verifier terminal). The orchestrator also gets `read_file` and
+`grep` in both interfaces, so it can probe the repo before and between dispatches.
 Capability tools a brief grants its workers/verifiers:
 
 | Tool | Description | Execution |
@@ -168,9 +209,20 @@ full `model_name` Doubleword serves — Kimi K2.6 is just the default, not a har
 
 ### Useful flags
 
-`--service-tier priority|flex` · `--background/--no-background` · `--max-files` (skipped
-files logged) · `--max-agents` · `--max-waves` · `--max-rounds` · `--no-verify` ·
-`--enable-search` (else on iff `SERPER_API_KEY` set) · `--dry-run`.
+- **Interface & models:** `--interface structured|kimi` · `-m/--model` ·
+  `--worker-model` (cheap workers, strong orchestrator/synthesizer — the runtime analogue
+  of the paper's "train the orchestrator with small sub-agents first").
+- **Tiers:** `--service-tier priority|flex` · `--background/--no-background` ·
+  `--max-concurrent` (in-flight requests per dispatch).
+- **Budgets:** `--max-files` (skipped files logged) · `--max-agents` (total workers) ·
+  `--max-waves` · `--max-steps` (orchestrator turns) · `--max-rounds` (tool rounds per
+  worker/verifier) · `--max-files-per-worker` (oversized specs split engine-side).
+- **Verify & search:** `--verify-votes N` (panel size, majority vote) · `--no-verify` ·
+  `--enable-search` (else on iff `SERPER_API_KEY` set).
+- `--dry-run` — print the plan (resolved tools per role, repo map) with no API calls.
+
+Per-model token usage, cost (summed across orchestrator/worker models), coverage, and the
+critical/total step counts land in `summary.json`.
 
 ## Service tiers & measuring cost
 
@@ -203,15 +255,21 @@ src/
 `engine.run_swarm(client, brief, root, files, cfg)` is the core; it never mentions
 audits. Results land in `results/<brief>-<slug>/{report.md, <results>.json,
 swarm-tree.json, summary.json}`. Run the tests with `uv run pytest` — the engine is
-covered end-to-end with a mocked dispatch (no network) across both briefs.
+covered end-to-end with a mocked dispatch (no network): both interfaces, the failure
+paths (dead orchestrator, zero workers, dead synthesis), schema validation, the forced
+submit/verdict turns, the vote panel, context budgets, and the step accounting.
 
 ## Limitations & notes
 
 - **Reasoning latency:** K2.6 reasons; even at `reasoning.effort=minimal` each call is
   tens of seconds, so a swarm takes minutes. A request timeout fails a stalled call
   gracefully rather than hanging the run.
-- **Cost figures are a guide:** computed from the API's reported token usage; treat
-  `dw usage` as the source of truth for actual spend.
+- **Cost figures are a guide:** computed from the API's reported token usage (per model);
+  treat `dw usage` as the source of truth for actual spend.
 - **Read-only:** results include suggestions as text; nothing is applied or executed.
-- Large repos are sampled to `--max-files` (skipped files logged); the verifier stage
-  reduces false positives but does not eliminate them.
+- **Verification is a filter, not a proof:** the panel reduces false positives (and flags
+  what it couldn't verify) but doesn't eliminate them; large repos are still sampled to
+  `--max-files` (skipped files logged).
+- **No training:** PARL is how Kimi *trains* the orchestrator; this repo is inference-time
+  scaffolding. The `kimi` interface matches the trained tool surface and we report the
+  paper's critical-steps metric, but parallelization quality rides on the base model.

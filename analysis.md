@@ -15,7 +15,26 @@ dw project run compare -- --repo psf/requests --max-files 20
 ```
 
 `compare` writes a wall-clock / token / cost table to `results/<slug>/analysis.md`.
-Cost is `measured tokens ×` the per-(model, tier) rate table in `src/cost.py`.
+Cost is `measured tokens ×` the per-(model, tier) rate table in `src/cost.py`, summed
+across every model the run used (relevant when `--worker-model` routes workers to a
+cheaper model than the orchestrator/synthesizer).
+
+## Reading the parallelism (critical steps)
+
+Every run reports two step counts in `summary.json` and the run footer, mirroring the
+PARL paper's *critical-steps* metric (K2.5 tech report §3):
+
+- **total** — every agent turn the run made (the sequential-equivalent work).
+- **critical** — the longest dependent path: each orchestrator turn, plus `max(worker
+  rounds)` per wave (a wave finishes when its slowest worker finishes), plus `max(verifier
+  rounds)`, plus synthesis. This is what wall-clock tracks when fan-out is truly parallel.
+
+`speedup = total / critical` is the swarm's own decomposition quality — how much the
+orchestrator actually parallelized, scored the way the paper scores it. A speedup near
+1.0 means the orchestrator serialized (one worker, or workers that each needed many tool
+rounds); a higher number means it spread independent work across the cohort. This is an
+*intrinsic* measure (it doesn't depend on tier), so it's comparable across `priority` and
+`flex` runs and across the `structured` vs `kimi` interfaces.
 
 ## Measuring cost accurately
 
