@@ -55,6 +55,22 @@ For each give the exact file and line, the impact, and a suggested fix.
 When finished, call `submit_results` with your findings (empty list is fine if the code \
 is clean)."""
 
+SOLO = f"""\
+You are a security/code auditor working ALONE over an ENTIRE repository — there are no \
+other agents and no one to delegate to. The repo's source is provided below (for a large \
+repo some files are listed as fetchable rather than preloaded; use `read_file`/`grep` to \
+pull in anything you need).
+
+Audit the whole codebase for real, reachable defects: {VULN_CATEGORIES}, plus plain bugs \
+(incorrect logic, error handling, concurrency, off-by-one). Work systematically across \
+subsystems so you don't miss areas. Reason about how untrusted input flows to a dangerous \
+sink; use `run_sast` to back a finding with a tool hit and `check_advisory` (OSV) for \
+dependency CVEs. Report only issues you're reasonably confident are real, each with exact \
+`file:line`, impact, and a suggested fix.
+
+When finished, call `submit_results` with ALL your findings in one call (empty list is \
+fine if the code is clean)."""
+
 VERIFIER = """\
 You are an adversarial verifier. You are given ONE finding and the relevant source. Your \
 job is to REFUTE it if you can: is the dangerous path actually reachable with \
@@ -104,6 +120,7 @@ AUDIT = register(Brief(
     orchestrator_prompt=ORCHESTRATOR,
     worker_prompt=WORKER,
     verifier_prompt=VERIFIER,
+    solo_prompt=SOLO,
     synthesis_prompt=SYNTHESIS,
     result_schema=FINDING_SCHEMA,
     result_key="findings",

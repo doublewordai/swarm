@@ -25,3 +25,9 @@ def test_result_schemas_are_objects():
         b = briefs.get_brief(name)
         assert b.result_schema["type"] == "object"
         assert isinstance(b.worker_tools, tuple)
+
+
+def test_builtin_briefs_have_solo_prompt():
+    for name in ("audit", "onboarding"):
+        b = briefs.get_brief(name)
+        assert b.solo_prompt and ("entire" in b.solo_prompt.lower() or "whole" in b.solo_prompt.lower())

@@ -20,6 +20,7 @@ class Brief:
     result_schema: dict                      # JSON schema for ONE result item
     result_key: str = "results"              # array key for submit_results + the results file
     verifier_prompt: str | None = None       # None ⇒ skip the verify stage
+    solo_prompt: str | None = None            # whole-repo system prompt for --solo (else worker_prompt)
     worker_tools: tuple = ("read_file", "grep")
     verifier_tools: tuple = ()
     dedupe_key: Callable | None = None        # item -> hashable key (None ⇒ no dedupe)

@@ -57,6 +57,7 @@ class SwarmConfig:
     model: str
     worker_model: str | None = None      # model for workers/verifiers (None ⇒ model)
     interface: str = "structured"        # structured | kimi (see module docstring)
+    solo: bool = False                   # one agent does the whole repo, no orchestration
     service_tier: str = "priority"
     background: bool = False
     max_agents: int = 100                # total worker budget across the run
@@ -66,6 +67,7 @@ class SwarmConfig:
     max_rounds: int = 3                  # tool rounds per worker/verifier (+1 forced submit)
     max_files_per_worker: int = 30       # oversized specs are split engine-side
     worker_context_chars: int = 200_000  # preload budget per worker (~50k tokens)
+    worker_max_output_tokens: int = 8192  # per worker/verifier turn (solo bumps this)
     map_max_chars: int = 80_000          # repo-map budget (~20k tok) — big repos go tree-only
     orchestrator_max_output_tokens: int = 16384  # room to emit a full team in one turn
     verify: bool = True
@@ -375,6 +377,7 @@ def _run_pool(client, pool: list[Agent], tools_: list[dict], terminal: str, on_t
             break
         reqs = [_req(a.model, a.input_items, tools_=tools_,
                      temperature=cfg.resolved_temperature(0),
+                     max_output_tokens=cfg.worker_max_output_tokens,
                      reasoning_effort=cfg.reasoning_effort) for a in active]
         for a, resp in zip(active, _dispatch(client, reqs, cfg)):
             consume(a, resp)
@@ -387,6 +390,7 @@ def _run_pool(client, pool: list[Agent], tools_: list[dict], terminal: str, on_t
         reqs = [_req(a.model, a.input_items, tools_=tools_,
                      tool_choice={"type": "function", "name": terminal},
                      temperature=cfg.resolved_temperature(0),
+                     max_output_tokens=cfg.worker_max_output_tokens,
                      reasoning_effort=cfg.reasoning_effort) for a in stragglers]
         for a, resp in zip(stragglers, _dispatch(client, reqs, cfg)):
             consume(a, resp, forced=True)
@@ -697,6 +701,30 @@ def _orchestrate_kimi(client, root, brief, files, cfg, tokens, steps, ids, agent
     return all_results, assigned, waves
 
 
+# --- solo (single-agent baseline) ----------------------------------------------
+
+
+def _run_solo(client, root, brief, files, cfg, tokens, steps, ids, agents, on_event,
+              results_tool):
+    """One agent audits the whole repo, no orchestration — the paper's single-agent
+    baseline. Reuses the worker loop (tools + forced submit); the whole-repo source is
+    preloaded up to cfg.worker_context_chars, the rest reachable via read_file/grep.
+    Downstream dedupe/verify/synthesize is identical to the swarm, so the only variable
+    is orchestration + parallelism.
+    """
+    on_event("solo", f"single agent over {len(files)} file(s) — no orchestration")
+    spec = {"role": "solo auditor", "focus": "the entire repository", "files": list(files),
+            "_system_prompt": brief.solo_prompt or brief.worker_prompt}
+    workers = _run_workers(client, root, brief, [spec], cfg, tokens, ids, agents,
+                           on_event, results_tool)
+    _track_wave_steps(steps, workers)
+    solo = workers[0]
+    if solo.status == "failed":
+        raise SwarmError(f"solo agent failed: {solo.meta.get('error', 'request failed')} "
+                         "— aborting rather than writing an empty report")
+    return list(solo.results), set(files), 1
+
+
 # --- verification --------------------------------------------------------------
 
 
@@ -826,14 +854,18 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
     results_tool = tools.submit_results_tool(brief.result_key, brief.result_schema,
                                              brief.submit_description)
 
-    repo_map = repo.build_repo_map(root, files, max_chars=cfg.map_max_chars)
-    orch = _orchestrator_agent(brief, cfg, repo_map, len(files))
-    agents.append(orch)
-
-    orchestrate = _orchestrate_kimi if cfg.interface == "kimi" else _orchestrate_structured
-    all_results, assigned, waves = orchestrate(
-        client, root, brief, files, cfg, tokens, steps, ids, agents, emit,
-        results_tool, orch)
+    if cfg.solo:
+        orch = None
+        all_results, assigned, waves = _run_solo(
+            client, root, brief, files, cfg, tokens, steps, ids, agents, emit, results_tool)
+    else:
+        repo_map = repo.build_repo_map(root, files, max_chars=cfg.map_max_chars)
+        orch = _orchestrator_agent(brief, cfg, repo_map, len(files))
+        agents.append(orch)
+        orchestrate = _orchestrate_kimi if cfg.interface == "kimi" else _orchestrate_structured
+        all_results, assigned, waves = orchestrate(
+            client, root, brief, files, cfg, tokens, steps, ids, agents, emit,
+            results_tool, orch)
 
     if _count_workers(agents) == 0:
         raise SwarmError("orchestrator dispatched no workers — the run produced nothing; "
@@ -881,7 +913,7 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
     emit("synthesize", f"writing report from {len(results)} item(s)")
     report = _synthesize(client, brief, cfg, tokens, steps, len(files), confirmed,
                          unverified, n_refuted, verified_stage,
-                         orch.meta.get("closing_note"), errors, emit)
+                         (orch.meta.get("closing_note") if orch else None), errors, emit)
 
     return {
         "report": report,
@@ -889,7 +921,7 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
         "results": results,
         "n_refuted": n_refuted,
         "errors": errors,
-        "interface": cfg.interface,
+        "interface": "solo" if cfg.solo else cfg.interface,
         "agents": [{"id": a.id, "role": a.role, "status": a.status, "rounds": a.rounds,
                     "meta": (a.meta if a.role != "verifier"
                              else {"item": a.meta.get("item", {}).get("title", "")}),

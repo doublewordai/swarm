@@ -37,6 +37,15 @@ does — do not invent behavior.
 
 When finished, call `submit_results` with one section per file/module you covered."""
 
+SOLO = """\
+You are documenting an ENTIRE repository on your own — there are no other agents. The \
+repo's source is provided below (for a large repo some files are listed as fetchable; use \
+`read_file`/`grep` to pull in what you need). Work through the whole codebase subsystem by \
+subsystem. For each subsystem produce a section: `purpose`, `key_components`, \
+`dependencies`, and `notes` (gotchas/entry points). Describe what the code actually does.
+
+When finished, call `submit_results` with one section per subsystem/module you covered."""
+
 SYNTHESIS = """\
 You are the documentation synthesizer. Given the per-subsystem sections (JSON), write an \
 onboarding/architecture guide in Markdown: a short overview of what the project is and \
@@ -63,6 +72,7 @@ ONBOARDING = register(Brief(
     orchestrator_prompt=ORCHESTRATOR,
     worker_prompt=WORKER,
     verifier_prompt=None,  # documentation doesn't need adversarial verification
+    solo_prompt=SOLO,
     synthesis_prompt=SYNTHESIS,
     result_schema=SECTION_SCHEMA,
     result_key="sections",

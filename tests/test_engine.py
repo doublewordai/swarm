@@ -727,3 +727,71 @@ def test_echo_drops_idless_reasoning_summary():
     ]}
     engine._echo_outputs(a, resp)
     assert [it["type"] for it in a.input_items] == ["function_call"]
+
+
+# --- solo mode: one agent, whole repo, no orchestration (paper's baseline) ----
+
+
+def test_solo_runs_one_agent_without_orchestrator(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.py").write_text("y = 1\n")
+    captured = _capture(monkeypatch, [
+        [_fc("submit_results", {"sections": [{"title": "t", "purpose": "p"}]})],  # solo agent
+        [_text("# Guide")],                                                       # synth
+    ])
+    res = engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py", "b.py"],
+                           engine.SwarmConfig(model="m", solo=True))
+    assert not any(a["role"] == "orchestrator" for a in res["agents"])   # no orchestrator
+    workers = [a for a in res["agents"] if a["role"] == "worker"]
+    assert len(workers) == 1                                             # exactly one agent
+    assert set(workers[0]["meta"]["files"]) == {"a.py", "b.py"}          # the whole repo
+    assert res["coverage"] == {"assigned": 2, "total": 2}
+    assert res["steps"]["speedup"] == 1.0                               # no parallelism
+    # no dispatch_workers / create_subagent anywhere — it never orchestrates
+    tool_names = {t["name"] for batch in captured for req in batch for t in req.get("tools", [])}
+    assert "dispatch_workers" not in tool_names and "create_subagent" not in tool_names
+
+
+def test_solo_uses_solo_prompt_framing(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = _capture(monkeypatch, [
+        [_fc("submit_results", {"findings": []})],
+        [_text("# Audit")],
+    ])
+    engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m", solo=True, verify=False))
+    system = captured[0][0]["input_items"][0]["content"].lower()
+    assert "entire" in system or "whole" in system        # whole-repo framing, not "only your files"
+
+
+def test_solo_findings_still_verified_and_synthesized(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    return run_command()\n")
+    engine_seq = _capture(monkeypatch, [
+        [_fc("submit_results", {"findings": [FINDING]})],                       # solo agent
+        [_fc("submit_verdict", {"is_real": True, "confidence": 0.9, "reasoning": "y"})],  # verify
+        [_text("# Audit")],                                                     # synth
+    ])
+    res = engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["a.py"],
+                           engine.SwarmConfig(model="m", solo=True))
+    assert len(res["results"]) == 1 and res["results"][0]["verification"] == "confirmed"
+    assert res["report"].startswith("# Audit")
+
+
+def test_solo_agent_failure_raises(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _capture(monkeypatch, [[_failed("ctx overflow")]])
+    with pytest.raises(engine.SwarmError, match="solo"):
+        engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["a.py"],
+                         engine.SwarmConfig(model="m", solo=True))
+
+
+def test_solo_worker_uses_configured_output_budget(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = _capture(monkeypatch, [
+        [_fc("submit_results", {"findings": []})],
+        [_text("# Audit")],
+    ])
+    engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m", solo=True, verify=False,
+                                        worker_max_output_tokens=32768))
+    assert captured[0][0]["max_output_tokens"] == 32768
