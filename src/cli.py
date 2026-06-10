@@ -43,6 +43,20 @@ def _prepare(repo_, path_, max_files, output):
     return root, slug, files, dropped
 
 
+def _cost_of(cfg, tk) -> dict:
+    """Cost across all models used (orchestrator/synth on cfg.model, workers on worker_model)."""
+    by_model = tk.get("by_model") or {cfg.model: tk}
+    total, known = 0.0, True
+    for model, mt in by_model.items():
+        c = cost.compute_cost(model, cfg.service_tier, mt["input_tokens"],
+                              mt["output_tokens"] + mt.get("reasoning_tokens", 0))
+        if c["rate_known"]:
+            total += c["cost_usd"]
+        else:
+            known = False
+    return {"cost_usd": total if known else None, "rate_known": known}
+
+
 def _write_results(output, slug, brief, res, cfg, wall) -> dict:
     d = Path(output) / slug
     d.mkdir(parents=True, exist_ok=True)
@@ -50,24 +64,30 @@ def _write_results(output, slug, brief, res, cfg, wall) -> dict:
     (d / f"{res['result_key']}.json").write_text(json.dumps(res["results"], indent=2))
     (d / "swarm-tree.json").write_text(json.dumps(res["agents"], indent=2))
     tk = res["tokens"]
-    c = cost.compute_cost(cfg.model, cfg.service_tier, tk["input_tokens"],
-                          tk["output_tokens"] + tk.get("reasoning_tokens", 0))
+    c = _cost_of(cfg, tk)
     summary = {
         "brief": brief.name, "result_key": res["result_key"], "slug": slug, "model": cfg.model,
+        "worker_model": cfg.worker_model, "interface": res.get("interface", cfg.interface),
         "service_tier": cfg.service_tier, "background": cfg.background, "tokens": tk,
         "wall_clock_s": round(wall, 1), "cost_usd": c["cost_usd"], "rate_known": c["rate_known"],
-        "coverage": res["coverage"], "waves": res["waves"], "n_results": len(res["results"]),
+        "coverage": res["coverage"], "waves": res["waves"], "steps": res.get("steps"),
+        "n_results": len(res["results"]), "n_refuted": res.get("n_refuted", 0),
+        "errors": res.get("errors", []),
     }
     (d / "summary.json").write_text(json.dumps(summary, indent=2))
     return summary
 
 
-def _make_cfg(model_id, service_tier, background, max_files, max_agents, max_waves,
-              max_rounds, no_verify, search_enabled):
+def _make_cfg(model_id, worker_model_id, interface, service_tier, background, max_files,
+              max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
+              max_concurrent, verify_votes, no_verify, search_enabled):
     return engine.SwarmConfig(
-        model=model_id, service_tier=service_tier, background=background,
-        max_files=max_files, max_agents=max_agents, max_waves=max_waves,
-        max_rounds=max_rounds, verify=not no_verify, search_enabled=search_enabled,
+        model=model_id, worker_model=worker_model_id, interface=interface,
+        service_tier=service_tier, background=background, max_files=max_files,
+        max_agents=max_agents, max_waves=max_waves, max_steps=max_steps,
+        max_rounds=max_rounds, max_files_per_worker=max_files_per_worker,
+        max_concurrent=max_concurrent, verify_votes=verify_votes,
+        verify=not no_verify, search_enabled=search_enabled,
     )
 
 
@@ -89,37 +109,48 @@ def briefs():
 @click.option("--repo", "repo_", default=None, help="GitHub repo 'owner/name' (shallow-cloned)")
 @click.option("--path", "path_", default=None, help="Local directory to work over")
 @click.option("-m", "--model", default="k2.6", help="Model alias (k2.6, k2.5) or full model_name")
+@click.option("--worker-model", default=None,
+              help="Model for workers/verifiers (cheap workers, strong orchestrator). Default: --model")
+@click.option("--interface", type=click.Choice(["structured", "kimi"]), default="structured",
+              help="structured (dispatch_workers) or kimi (create_subagent/assign_task, K2.5 §E.8)")
 @click.option("--service-tier", type=click.Choice(["priority", "flex"]), default="priority")
 @click.option("--background/--no-background", default=None,
               help="Background submit-then-poll (defaults on for flex)")
 @click.option("--max-files", default=500, help="Cap on source files")
-@click.option("--max-agents", default=100, help="Cap on parallel workers")
-@click.option("--max-waves", default=2, help="Max orchestrator dispatch waves")
-@click.option("--max-rounds", default=3, help="Max tool rounds per worker")
+@click.option("--max-agents", default=100, help="Cap on total workers across the run")
+@click.option("--max-waves", default=2, help="Max dispatch_workers waves (structured interface)")
+@click.option("--max-steps", default=8, help="Max orchestrator turns")
+@click.option("--max-rounds", default=3, help="Max tool rounds per worker/verifier")
+@click.option("--max-files-per-worker", default=30, help="Split worker specs larger than this")
+@click.option("--max-concurrent", default=12, help="Max in-flight requests per dispatch")
+@click.option("--verify-votes", default=1, help="Verifiers per finding; majority decides")
 @click.option("--no-verify", is_flag=True, help="Skip the verifier stage (if the brief has one)")
 @click.option("--enable-search/--no-enable-search", default=None,
               help="Web-search grounding tools (default: on iff SERPER_API_KEY is set)")
 @click.option("-o", "--output", default="results/", help="Output directory")
 @click.option("--dry-run", is_flag=True, help="Build & print the plan; no API calls")
-def run(brief, repo_, path_, model, service_tier, background, max_files, max_agents,
-        max_waves, max_rounds, no_verify, enable_search, output, dry_run):
+def run(brief, repo_, path_, model, worker_model, interface, service_tier, background,
+        max_files, max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
+        max_concurrent, verify_votes, no_verify, enable_search, output, dry_run):
     """Run a BRIEF over a repo/path (see `swarm briefs`)."""
     if bool(repo_) == bool(path_):
         raise click.UsageError("provide exactly one of --repo or --path")
     b = _resolve_brief(brief)
     model_id = _resolve_model(model)
+    worker_model_id = _resolve_model(worker_model) if worker_model else None
     if background is None:
         background = service_tier == "flex"
     search_enabled = enable_search if enable_search is not None else bool(os.environ.get("SERPER_API_KEY"))
 
     root, slug, files, dropped = _prepare(repo_, path_, max_files, output)
     out_slug = f"{b.name}-{slug}"
-    cfg = _make_cfg(model_id, service_tier, background, max_files, max_agents, max_waves,
-                    max_rounds, no_verify, search_enabled)
+    cfg = _make_cfg(model_id, worker_model_id, interface, service_tier, background, max_files,
+                    max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
+                    max_concurrent, verify_votes, no_verify, search_enabled)
     click.echo(f"Brief:   {b.name} — {b.description}")
-    click.echo(f"Model:   {model_id}")
+    click.echo(f"Model:   {model_id}" + (f"  (workers: {worker_model_id})" if worker_model_id else ""))
     click.echo(f"Target:  {slug}  ({len(files)} source files)")
-    click.echo(f"Tier:    {service_tier} (background={background})")
+    click.echo(f"Mode:    {interface} interface · tier {service_tier} (background={background})")
     if dropped:
         shown = ", ".join(dropped[:10]) + (" ..." if len(dropped) > 10 else "")
         click.echo(f"NOTE: capped at {max_files} files; skipped {len(dropped)}: {shown}")
@@ -127,37 +158,51 @@ def run(brief, repo_, path_, model, service_tier, background, max_files, max_age
     if dry_run:
         rtool = tools.submit_results_tool(b.result_key, b.result_schema, b.submit_description)
         click.echo("\n--- DRY RUN (no API calls) ---")
-        click.echo("Orchestrator: " + ", ".join(t["name"] for t in tools.tools_for("orchestrator")))
+        click.echo("Orchestrator: " + ", ".join(
+            t["name"] for t in tools.tools_for("orchestrator", interface=interface)))
         click.echo("Worker:       " + ", ".join(t["name"] for t in tools.tools_for(
             "worker", worker_tools=b.worker_tools, search_enabled=search_enabled, results_tool=rtool)))
         vtools = (", ".join(t["name"] for t in tools.tools_for(
             "verifier", verifier_tools=b.verifier_tools, search_enabled=search_enabled))
+            + (f"  (×{verify_votes} votes)" if verify_votes > 1 else "")
             if b.verifier_prompt else "(no verify stage for this brief)")
         click.echo("Verifier:     " + vtools)
-        rmap = repo.build_repo_map(root, files)
+        rmap = repo.build_repo_map(root, files, max_chars=cfg.map_max_chars)
         click.echo(f"\nRepo map ({len(rmap)} chars), first 2000:\n")
         click.echo(rmap[:2000])
         return
 
     client = R.make_client("doubleword")
     t0 = time.time()
-    res = engine.run_swarm(client, b, root, files, cfg,
-                           on_event=lambda kind, msg: click.echo(f"  [{kind}] {msg}"))
+    try:
+        res = engine.run_swarm(client, b, root, files, cfg,
+                               on_event=lambda kind, msg: click.echo(f"  [{kind}] {msg}"))
+    except engine.SwarmError as exc:
+        raise click.ClickException(f"swarm failed: {exc}")
     wall = time.time() - t0
     summary = _write_results(output, out_slug, b, res, cfg, wall)
 
     d = Path(output) / out_slug
     click.echo()
-    click.echo(f"{b.result_key.capitalize()}: {summary['n_results']}  ·  "
+    refuted = f"  ·  {res['n_refuted']} refuted" if res.get("n_refuted") else ""
+    click.echo(f"{b.result_key.capitalize()}: {summary['n_results']}{refuted}  ·  "
                f"coverage {res['coverage']['assigned']}/{res['coverage']['total']} files  ·  waves {res['waves']}")
     tk = res["tokens"]
     click.echo(f"Tokens:  {tk['input_tokens']:,} in / {tk['output_tokens']:,} out "
                f"(+{tk.get('reasoning_tokens', 0):,} reasoning)")
+    st = res.get("steps") or {}
+    if st:
+        click.echo(f"Steps:   {st['critical']} critical / {st['total']} total "
+                   f"({st['speedup']}× parallel speedup)")
     if summary["rate_known"]:
         click.echo(f"Cost:    ${summary['cost_usd']:.4f} ({service_tier})   (use `dw usage` for actual spend)")
     else:
         click.echo(f"Cost:    rate not seeded for {model_id}/{service_tier} (see cost.RATES); use `dw usage`")
     click.echo(f"Wall:    {wall:.1f}s")
+    if res.get("errors"):
+        click.echo()
+        for e in res["errors"]:
+            click.echo(f"  WARNING: {e}")
     click.echo()
     click.echo(f"Results written to {d}/")
     click.echo(f"  report.md           the synthesized report (human-readable)")
@@ -169,6 +214,11 @@ def run(brief, repo_, path_, model, service_tier, background, max_files, max_age
     click.echo(f"  • Read it:            dw project run report   (or open {d / 'report.md'})")
     click.echo(f"  • Structured output:  jq '.' {d / (res['result_key'] + '.json')}")
     click.echo("  • Re-run differently: another brief, --service-tier flex --background, or -m <model>")
+
+    # The report itself failed to generate — results were preserved, but the run
+    # did not deliver what it promised, so exit nonzero (loud, not silent).
+    if any(e.startswith("synthesis failed") for e in res.get("errors", [])):
+        raise click.ClickException("synthesis failed — results were written but the report was not generated")
 
 
 @cli.command()
@@ -225,16 +275,21 @@ def compare(brief, repo_, path_, model, max_files, max_agents, enable_search, ou
                                  max_files=max_files, max_agents=max_agents, verify=True,
                                  search_enabled=search_enabled)
         t0 = time.time()
-        res = engine.run_swarm(client, b, root, files, cfg,
-                               on_event=lambda kind, msg: click.echo(f"  [{kind}] {msg}"))
+        try:
+            res = engine.run_swarm(client, b, root, files, cfg,
+                                   on_event=lambda kind, msg: click.echo(f"  [{kind}] {msg}"))
+        except engine.SwarmError as exc:
+            click.echo(f"  swarm failed on {tier}: {exc}")
+            click.echo()
+            continue
         wall = time.time() - t0
         _write_results(output, f"{b.name}-{slug}-{tier}", b, res, cfg, wall)
-        tk = res["tokens"]
-        c = cost.compute_cost(model_id, tier, tk["input_tokens"],
-                              tk["output_tokens"] + tk.get("reasoning_tokens", 0))
-        rows.append({"tier": tier, "background": bg, "tokens": tk, "wall": wall,
-                     "cost": c, "n": len(res["results"])})
+        rows.append({"tier": tier, "background": bg, "tokens": res["tokens"], "wall": wall,
+                     "cost": _cost_of(cfg, res["tokens"]), "n": len(res["results"])})
         click.echo()
+
+    if not rows:
+        raise click.ClickException("both tiers failed — nothing to compare")
 
     md = _comparison_md(b.name, slug, model_id, len(files), rows)
     out_path = Path(output) / f"{b.name}-{slug}"
