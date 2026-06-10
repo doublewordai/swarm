@@ -220,3 +220,76 @@ def test_call_omits_temperature_when_none(monkeypatch):
     assert "temperature" not in sent
     R.call(client, model="m", input_items=[], temperature=0)
     assert sent["temperature"] == 0
+
+
+def _bad_request(param, message):
+    resp = httpx.Response(400, request=httpx.Request("POST", "http://test"))
+    from openai import BadRequestError
+    return BadRequestError(message, response=resp,
+                           body={"error": {"param": param, "message": message,
+                                           "type": "invalid_request_error"}})
+
+
+class _RejectsParamClient:
+    """responses.create 400s on an unsupported param until it's removed from the body."""
+
+    def __init__(self, reject_param, message):
+        self.reject_param, self.message, self.bodies = reject_param, message, []
+        outer = self
+
+        class _Responses:
+            def create(self, **body):
+                outer.bodies.append(dict(body))
+                if outer.reject_param in body:
+                    raise _bad_request(outer.reject_param, outer.message)
+
+                class _R:
+                    @staticmethod
+                    def model_dump():
+                        return {"status": "completed", "output": [], "usage": {}}
+
+                return _R()
+
+        self.responses = _Responses()
+
+
+def test_call_drops_unsupported_temperature_and_retries():
+    client = _RejectsParamClient("temperature", "Unsupported parameter: 'temperature' is not supported with this model.")
+    resp = R.call(client, model="gpt-5.5", input_items=[], temperature=0)
+    assert resp["status"] == "completed"
+    assert len(client.bodies) == 2                 # first rejected, retried
+    assert "temperature" not in client.bodies[1]   # dropped on the retry
+
+
+def test_call_drops_unsupported_service_tier():
+    client = _RejectsParamClient("service_tier", "Unsupported parameter: 'service_tier' is not supported.")
+    resp = R.call(client, model="gpt-5.5", input_items=[], service_tier="priority", temperature=None)
+    assert resp["status"] == "completed"
+    assert "service_tier" not in client.bodies[-1]
+
+
+def test_call_does_not_swallow_unrelated_400():
+    # A real bad request (not an unsupported-param) must still surface.
+    from openai import BadRequestError
+
+    class _C:
+        class responses:
+            @staticmethod
+            def create(**body):
+                resp = httpx.Response(400, request=httpx.Request("POST", "http://t"))
+                raise BadRequestError("context_length_exceeded", response=resp,
+                                      body={"error": {"message": "too long", "code": "context_length_exceeded"}})
+
+    with pytest.raises(BadRequestError):
+        R.call(_C(), model="m", input_items=[], temperature=0)
+
+
+def test_call_memoizes_dropped_param_across_calls():
+    # The second call on the same client must skip the rejected param outright,
+    # not pay the reject+retry round-trip again.
+    client = _RejectsParamClient("temperature", "Unsupported parameter: 'temperature' is not supported.")
+    R.call(client, model="gpt-5.5", input_items=[], temperature=0)
+    n = len(client.bodies)                         # 2: rejected + retried
+    R.call(client, model="gpt-5.5", input_items=[], temperature=0)
+    assert len(client.bodies) == n + 1             # one clean call, no rejection
+    assert "temperature" not in client.bodies[-1]

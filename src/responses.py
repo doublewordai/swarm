@@ -15,6 +15,7 @@ from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
+    BadRequestError,
     OpenAI,
     RateLimitError,
 )
@@ -142,6 +143,55 @@ def finish_of(resp: dict) -> str:
 
 # --- API calls -------------------------------------------------------------
 
+# Request params some models reject outright (rather than ignore). When the API
+# says one is unsupported we drop it and retry, so e.g. gpt-5-class reasoning
+# models — which reject any `temperature` — work without the caller knowing the
+# per-model quirks. Driven by the API's own error, not a hardcoded model list.
+_DROPPABLE_PARAMS = {"temperature", "service_tier", "reasoning"}
+
+
+def _unsupported_param(exc: BadRequestError) -> str | None:
+    """The request param the API rejected as unsupported, if that's why it 400'd."""
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    if "support" not in msg:  # "not supported" / "unsupported parameter"
+        return None
+    param = getattr(exc, "param", None)
+    if not param:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error") if isinstance(body.get("error"), dict) else body
+            param = (err or {}).get("param")
+    return param
+
+
+def _create_with_fallback(client, body: dict) -> dict:
+    """POST /v1/responses, dropping any param the model rejects as unsupported.
+
+    The first call against a model that rejects e.g. ``temperature`` pays one
+    retry; the rejected param is then remembered on the client and pre-stripped
+    from every later call, so a large swarm doesn't double every round-trip.
+    """
+    dropped = getattr(client, "_swarm_dropped", None)
+    if dropped is None:
+        dropped = set()
+        try:
+            client._swarm_dropped = dropped
+        except (AttributeError, TypeError):
+            pass  # exotic client; fall back to per-call retry
+    for p in dropped:
+        body.pop(p, None)
+    for _ in range(len(_DROPPABLE_PARAMS) + 1):
+        try:
+            return client.responses.create(**body).model_dump()
+        except BadRequestError as exc:
+            param = _unsupported_param(exc)
+            if param in _DROPPABLE_PARAMS and param in body:
+                del body[param]
+                dropped.add(param)
+                continue
+            raise
+    return client.responses.create(**body).model_dump()
+
 
 @_retry
 def call(
@@ -179,7 +229,7 @@ def call(
         body["reasoning"] = {"effort": reasoning_effort}
     if background:
         body["background"] = True
-    return client.responses.create(**body).model_dump()
+    return _create_with_fallback(client, body)
 
 
 def poll(client, response_id, interval: float = 3.0, timeout: float = 1800) -> dict:

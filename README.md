@@ -238,6 +238,12 @@ OpenAI's gpt-5-class reasoning models reject `temperature` and use `reasoning.ef
 (or `none` to omit) sets the depth. Both apply to every role (orchestrator, workers,
 verifiers, synthesizer).
 
+You don't have to get this exactly right up front: if a model rejects a request param
+as unsupported (e.g. `temperature` on gpt-5.5), the client drops that param and retries,
+then remembers it for the rest of the run — so the swarm works even with the default
+`temperature`. Being explicit (`--temperature none`) just avoids the one extra round-trip
+on the first call.
+
 ### Useful flags
 
 - **Provider & models:** `--provider doubleword|openai` · `-m/--model` ·
