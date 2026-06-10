@@ -23,6 +23,7 @@ Tier behaviour lives entirely in ``responses.dispatch`` (realtime concurrent vs 
 background+poll), so the engine is tier-agnostic too.
 """
 
+import inspect
 import json
 from dataclasses import dataclass, field
 
@@ -96,6 +97,19 @@ def _files_body(root: str, files: list[str], budget_chars: int) -> str:
         body += ("\n\nAssigned but NOT preloaded (context budget) — fetch with `read_file` "
                  "as needed:\n" + "\n".join(f"- {rel}" for rel in deferred))
     return body
+
+
+def _corpus_listing(files: list[str], max_chars: int = 12_000) -> str:
+    """A compact file listing a kimi sub-agent uses to navigate the repo it self-gathers."""
+    header = f"Repository files ({len(files)} total) — read what your task needs with read_file/grep:\n"
+    out, used = [header], len(header)
+    for i, rel in enumerate(files):
+        if used + len(rel) + 60 > max_chars:
+            out.append(f"... and {len(files) - i} more (use grep to locate the rest)")
+            break
+        out.append(rel)
+        used += len(rel) + 1
+    return "\n".join(out)
 
 
 def build_worker_input(root: str, brief: Brief, role: str, focus: str, files: list[str],
@@ -254,6 +268,39 @@ def _execute_capability(fc: dict, root: str) -> str:
     return out
 
 
+# --- event emission --------------------------------------------------------
+
+
+def _make_emit(on_event):
+    """Adapt a user callback to a uniform emit(kind, msg, data) call.
+
+    Back-compat: a handler that only accepts (kind, msg) still works — the
+    structured ``data`` payload (used by -v/-vv) is simply not passed to it.
+    """
+    try:
+        nparams = len(inspect.signature(on_event).parameters)
+    except (TypeError, ValueError):
+        nparams = 3
+    if nparams >= 3:
+        return lambda kind, msg="", data=None: on_event(kind, msg, data)
+    return lambda kind, msg="", data=None: on_event(kind, msg)
+
+
+def _emit_call(emit, role: str, agent_id: str, model: str, resp: dict) -> None:
+    """Emit a structured per-call event (timing/tokens/finish/tools) for verbose logs."""
+    u = R.usage_of(resp)
+    emit("call", f"{role} {agent_id}", {
+        "role": role, "agent": agent_id, "model": model,
+        "elapsed_s": resp.get("_elapsed_s"),
+        "in_tokens": u["input_tokens"],
+        "out_tokens": u["output_tokens"] + u.get("reasoning_tokens", 0),
+        "tokens": u["input_tokens"] + u["output_tokens"] + u.get("reasoning_tokens", 0),
+        "finish": R.finish_of(resp),
+        "tool_calls": [fc["name"] for fc in R.function_calls_of(resp)],
+        "error": resp.get("_error"),
+    })
+
+
 # --- agent pool (shared by workers and verifiers) ----------------------------
 
 _FORCE_MSG = ("Your tool budget is exhausted. Call `{name}` NOW with everything you have "
@@ -261,7 +308,7 @@ _FORCE_MSG = ("Your tool budget is exhausted. Call `{name}` NOW with everything 
 
 
 def _run_pool(client, pool: list[Agent], tools_: list[dict], terminal: str, on_terminal,
-              cfg: SwarmConfig, tokens: dict, *, root: str) -> None:
+              cfg: SwarmConfig, tokens: dict, *, root: str, emit=lambda *a: None) -> None:
     """Drive agents in lockstep tool rounds until each calls the terminal tool.
 
     Capability tool calls are executed and answered; agents that exhaust
@@ -273,6 +320,7 @@ def _run_pool(client, pool: list[Agent], tools_: list[dict], terminal: str, on_t
     def consume(agent: Agent, resp: dict, forced: bool = False) -> None:
         _add_tokens(tokens, resp, agent.model)
         agent.rounds += 1
+        _emit_call(emit, agent.role, agent.id, agent.model, resp)
         if R.finish_of(resp) == "error":
             agent.status = "failed"
             agent.meta["error"] = resp.get("_error", "request failed")
@@ -358,9 +406,14 @@ def _run_workers(client, root, brief, specs, cfg, tokens, ids, agents, on_event,
         return json.dumps({"status": "recorded", "count": len(items),
                            "invalid_dropped": dropped})
 
-    wtools = tools.tools_for("worker", worker_tools=brief.worker_tools,
+    # In the kimi interface workers self-gather their context, so guarantee they can
+    # navigate the repo even if the brief didn't list these tools.
+    extra = ("read_file", "grep") if cfg.interface == "kimi" else ()
+    wtool_names = tuple(dict.fromkeys(brief.worker_tools + extra))
+    wtools = tools.tools_for("worker", worker_tools=wtool_names,
                              search_enabled=cfg.search_enabled, results_tool=results_tool)
-    _run_pool(client, workers, wtools, "submit_results", on_submit, cfg, tokens, root=root)
+    _run_pool(client, workers, wtools, "submit_results", on_submit, cfg, tokens,
+              root=root, emit=on_event)
     if invalid["n"]:
         on_event("invalid", f"dropped {invalid['n']} schema-invalid item(s) "
                             f"(see {brief.result_key} schema)")
@@ -407,10 +460,11 @@ _KIMI_NOTE = """
 
 # Dispatch interface
 Design your own team. Call `create_subagent(name, system_prompt)` to define each \
-specialist — you author its system prompt — then `assign_task(agent, prompt, files?)` \
-to dispatch subtasks. Multiple assign_task calls in ONE turn run in PARALLEL; pass \
-`files` (repo-relative) to preload code into that agent's context. Agents are reusable \
-across tasks. You may use `read_file`/`grep` yourself to probe the repo first."""
+specialist — you author its system prompt — then `assign_task(agent, prompt)` to \
+dispatch a subtask. Describe each subtask precisely in `prompt` (which part of the repo, \
+what to produce); the sub-agent investigates the code itself with read_file/grep. \
+Multiple assign_task calls in ONE turn run in PARALLEL. Agents are reusable across \
+tasks. Use `read_file`/`grep` yourself first if you need to understand the layout."""
 
 
 def _orchestrator_agent(brief: Brief, cfg: SwarmConfig, repo_map: str, n_files: int) -> Agent:
@@ -425,7 +479,7 @@ def _orchestrator_agent(brief: Brief, cfg: SwarmConfig, repo_map: str, n_files: 
         ])
 
 
-def _orch_turn(client, orch: Agent, otools, cfg, tokens, steps) -> dict:
+def _orch_turn(client, orch: Agent, otools, cfg, tokens, steps, emit=lambda *a: None) -> dict:
     resp = _dispatch(client, [_req(cfg.model, orch.input_items, tools_=otools,
                                    temperature=cfg.orchestrator_temperature,
                                    max_output_tokens=cfg.orchestrator_max_output_tokens,
@@ -434,11 +488,19 @@ def _orch_turn(client, orch: Agent, otools, cfg, tokens, steps) -> dict:
     orch.rounds += 1
     steps["critical"] += 1
     steps["total"] += 1
+    _emit_call(emit, "orchestrator", orch.id, cfg.model, resp)
     if R.finish_of(resp) == "error":
         raise SwarmError(f"orchestrator call failed: {resp.get('_error', 'request failed')} "
                          "— aborting rather than writing an empty report")
     _echo_outputs(orch, resp)
     return resp
+
+
+def _emit_plan(emit, interface: str, wave: int, specs: list[dict]) -> None:
+    emit("plan", f"wave {wave}: {len(specs)} worker(s)", {
+        "interface": interface, "wave": wave,
+        "workers": [{"role": s.get("role", "worker"), "focus": s.get("focus", ""),
+                     "n_files": len(s.get("files") or [])} for s in specs]})
 
 
 def _orchestrate_structured(client, root, brief, files, cfg, tokens, steps, ids, agents,
@@ -449,7 +511,7 @@ def _orchestrate_structured(client, root, brief, files, cfg, tokens, steps, ids,
     otools = tools.tools_for("orchestrator")
 
     for _ in range(cfg.max_steps):
-        resp = _orch_turn(client, orch, otools, cfg, tokens, steps)
+        resp = _orch_turn(client, orch, otools, cfg, tokens, steps, on_event)
         fcs = R.function_calls_of(resp)
         if not fcs:
             orch.meta["closing_note"] = R.text_of(resp)
@@ -476,6 +538,7 @@ def _orchestrate_structured(client, root, brief, files, cfg, tokens, steps, ids,
                 specs = specs[:budget]
             for s in specs:
                 assigned.update(s.get("files") or [])
+            _emit_plan(on_event, "structured", waves + 1, specs)
             workers = _run_workers(client, root, brief, specs, cfg, tokens, ids, agents,
                                    on_event, results_tool)
             _track_wave_steps(steps, workers)
@@ -492,10 +555,35 @@ def _orchestrate_structured(client, root, brief, files, cfg, tokens, steps, ids,
 # --- orchestration: kimi interface ---------------------------------------------
 
 
-def _kimi_contract(brief: Brief) -> str:
-    return ("\n\n---\nHARNESS CONTRACT: investigate with your tools, then FINISH by "
-            f"calling `submit_results` with your items under `{brief.result_key}` "
-            f"(schema-enforced). {brief.submit_description}")
+def _kimi_contract(brief: Brief, corpus: str) -> str:
+    """The harness contract appended to the orchestrator-authored sub-agent prompt.
+
+    Faithful to the paper's flow (K2.5 §E.8): the orchestrator hands the sub-agent a
+    free-text task, and the sub-agent builds its OWN bounded context — here, by
+    investigating the repo with read_file/grep — rather than receiving pre-assigned
+    files. The corpus listing is the code-domain analogue of the search tools Kimi's
+    web sub-agents use to discover their material.
+    """
+    return ("\n\n---\nHARNESS CONTRACT: you are working over a code repository. "
+            "Investigate the files relevant to your task with `read_file` and `grep` "
+            "(grep searches the whole repo), gather what you need into your own context, "
+            f"then FINISH by calling `submit_results` with your items under "
+            f"`{brief.result_key}` (schema-enforced). {brief.submit_description}\n\n"
+            f"{corpus}")
+
+
+def _files_read_by(worker: Agent) -> set[str]:
+    """Repo files a worker actually opened via read_file — the kimi-mode coverage signal."""
+    seen = set()
+    for item in worker.input_items:
+        if item.get("type") == "function_call" and item.get("name") == "read_file":
+            try:
+                p = (json.loads(item.get("arguments") or "{}")).get("path")
+            except json.JSONDecodeError:
+                p = None
+            if p:
+                seen.add(p)
+    return seen
 
 
 def _orchestrate_kimi(client, root, brief, files, cfg, tokens, steps, ids, agents,
@@ -505,9 +593,10 @@ def _orchestrate_kimi(client, root, brief, files, cfg, tokens, steps, ids, agent
     waves = 0
     subagents: dict[str, str] = {}
     otools = tools.tools_for("orchestrator", interface="kimi")
+    corpus = _corpus_listing(files)
 
     for _ in range(cfg.max_steps):
-        resp = _orch_turn(client, orch, otools, cfg, tokens, steps)
+        resp = _orch_turn(client, orch, otools, cfg, tokens, steps, on_event)
         fcs = R.function_calls_of(resp)
         if not fcs:
             orch.meta["closing_note"] = R.text_of(resp)
@@ -543,20 +632,22 @@ def _orchestrate_kimi(client, root, brief, files, cfg, tokens, steps, ids, agent
                 _tool_output(orch, fc["call_id"], json.dumps(
                     {"error": f"agent budget exhausted ({cfg.max_agents}) — synthesize with what you have"}))
                 continue
-            task_files = _expand_spec_files(files, args.get("files"), args.get("paths"))
+            # Paper-faithful: pass the task only ({agent, prompt}); the sub-agent
+            # self-gathers context via read_file/grep. No harness-assigned files.
             specs.append({"role": name, "focus": (args.get("prompt") or "")[:120],
-                          "files": task_files, "_fc": fc["call_id"],
-                          "_system_prompt": subagents[name] + _kimi_contract(brief),
+                          "files": [], "_fc": fc["call_id"],
+                          "_system_prompt": subagents[name] + _kimi_contract(brief, corpus),
                           "_task": args.get("prompt", "")})
             spec_fcs.append(fc)
-            assigned.update(task_files)
 
         if specs:
-            specs = _split_specs(specs, cfg.max_files_per_worker)
             workers = _run_workers(client, root, brief, specs, cfg, tokens, ids, agents,
                                    on_event, results_tool)
+            _emit_plan(on_event, "kimi", waves + 1, specs)
             _track_wave_steps(steps, workers)
             waves += 1
+            for w in workers:
+                assigned.update(_files_read_by(w))
             for fc in spec_fcs:
                 ws = [w for w in workers if w.meta.get("fc_id") == fc["call_id"]]
                 items = [r for w in ws for r in w.results]
@@ -634,7 +725,8 @@ def _run_verifiers(client, root, brief, candidates, cfg, tokens, steps, ids, age
             agent.verdict = None
         return json.dumps({"status": "recorded"})
 
-    _run_pool(client, pool, vtools, "submit_verdict", on_verdict, cfg, tokens, root=root)
+    _run_pool(client, pool, vtools, "submit_verdict", on_verdict, cfg, tokens,
+              root=root, emit=on_event)
     steps["critical"] += max((a.rounds for a in pool), default=0)
     steps["total"] += sum(a.rounds for a in pool)
 
@@ -646,7 +738,7 @@ def _run_verifiers(client, root, brief, candidates, cfg, tokens, steps, ids, age
 
 
 def _synthesize(client, brief, cfg, tokens, steps, n_files, confirmed, unverified,
-                n_refuted, verified_stage, closing_note, errors) -> str:
+                n_refuted, verified_stage, closing_note, errors, emit=lambda *a: None) -> str:
     parts = [f"Files covered: {n_files}."]
     if verified_stage:
         parts.append(f"Confirmed results (JSON):\n{json.dumps(confirmed, indent=2)}")
@@ -672,6 +764,7 @@ def _synthesize(client, brief, cfg, tokens, steps, n_files, confirmed, unverifie
     _add_tokens(tokens, sresp, cfg.model)
     steps["critical"] += 1
     steps["total"] += 1
+    _emit_call(emit, "synth", "synthesizer", cfg.model, sresp)
 
     finish = R.finish_of(sresp)
     if finish == "error":
@@ -692,6 +785,7 @@ def _synthesize(client, brief, cfg, tokens, steps, n_files, confirmed, unverifie
 
 def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
               on_event=lambda *_: None) -> dict:
+    emit = _make_emit(on_event)
     tokens = _new_tokens()
     steps = {"critical": 0, "total": 0}
     ids = {"n": 0}
@@ -706,7 +800,7 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
 
     orchestrate = _orchestrate_kimi if cfg.interface == "kimi" else _orchestrate_structured
     all_results, assigned, waves = orchestrate(
-        client, root, brief, files, cfg, tokens, steps, ids, agents, on_event,
+        client, root, brief, files, cfg, tokens, steps, ids, agents, emit,
         results_tool, orch)
 
     if _count_workers(agents) == 0:
@@ -718,7 +812,7 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
                       f"({', '.join(a.id for a in failed_workers[:5])})")
 
     candidates = dedupe(all_results, brief.dedupe_key, brief.rank)
-    on_event("dedupe", f"{len(all_results)} raw → {len(candidates)} unique")
+    emit("dedupe", f"{len(all_results)} raw → {len(candidates)} unique")
 
     confirmed: list[dict] = []
     unverified: list[dict] = []
@@ -726,7 +820,7 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
     verified_stage = bool(cfg.verify and brief.verifier_prompt and candidates)
     if verified_stage:
         for item, verification, verdict in _run_verifiers(
-                client, root, brief, candidates, cfg, tokens, steps, ids, agents, on_event):
+                client, root, brief, candidates, cfg, tokens, steps, ids, agents, emit):
             it = dict(item)
             it["verdict"] = verdict
             it["verification"] = verification
@@ -740,10 +834,10 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
             else:
                 n_refuted += 1
         if n_refuted:
-            on_event("refuted", f"{n_refuted} item(s) refuted by verification")
+            emit("refuted", f"{n_refuted} item(s) refuted by verification")
         if unverified:
-            on_event("unverified", f"{len(unverified)} item(s) kept unverified "
-                                   "(verifier reached no verdict)")
+            emit("unverified", f"{len(unverified)} item(s) kept unverified "
+                               "(verifier reached no verdict)")
     else:
         confirmed = [{**c, "verdict": None, "verification": "skipped"} for c in candidates]
 
@@ -752,10 +846,10 @@ def run_swarm(client, brief: Brief, root, files, cfg: SwarmConfig, *,
         unverified.sort(key=brief.rank, reverse=True)
     results = confirmed + unverified
 
-    on_event("synthesize", f"writing report from {len(results)} item(s)")
+    emit("synthesize", f"writing report from {len(results)} item(s)")
     report = _synthesize(client, brief, cfg, tokens, steps, len(files), confirmed,
                          unverified, n_refuted, verified_stage,
-                         orch.meta.get("closing_note"), errors)
+                         orch.meta.get("closing_note"), errors, emit)
 
     return {
         "report": report,
