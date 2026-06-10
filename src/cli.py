@@ -126,19 +126,27 @@ def _parse_temperature(raw):
         raise click.UsageError(f"--temperature must be a number or 'none', got {raw!r}")
 
 
+# Solo mode gives the single agent a large context window and output budget so it can
+# take in (most of) the repo and emit all findings in one turn.
+SOLO_CONTEXT_CHARS = 3_000_000   # ~750k tokens preloaded; the rest via read_file/grep
+SOLO_OUTPUT_TOKENS = 32768
+
+
 def _make_cfg(model_id, worker_model_id, interface, service_tier, background, max_files,
               max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
               max_concurrent, verify_votes, no_verify, search_enabled,
-              reasoning_effort, temperature):
+              reasoning_effort, temperature, solo):
+    big = {"worker_context_chars": SOLO_CONTEXT_CHARS,
+           "worker_max_output_tokens": SOLO_OUTPUT_TOKENS} if solo else {}
     return engine.SwarmConfig(
-        model=model_id, worker_model=worker_model_id, interface=interface,
+        model=model_id, worker_model=worker_model_id, interface=interface, solo=solo,
         service_tier=service_tier, background=background, max_files=max_files,
         max_agents=max_agents, max_waves=max_waves, max_steps=max_steps,
         max_rounds=max_rounds, max_files_per_worker=max_files_per_worker,
         max_concurrent=max_concurrent, verify_votes=verify_votes,
         verify=not no_verify, search_enabled=search_enabled,
         reasoning_effort=(None if reasoning_effort == "none" else reasoning_effort),
-        temperature=_parse_temperature(temperature),
+        temperature=_parse_temperature(temperature), **big,
     )
 
 
@@ -170,6 +178,9 @@ def briefs():
               help="Sampling temperature (number), or 'none' to omit it (gpt-5-class models reject it)")
 @click.option("--interface", type=click.Choice(["structured", "kimi"]), default="structured",
               help="structured (dispatch_workers) or kimi (create_subagent/assign_task, K2.5 §E.8)")
+@click.option("--solo", is_flag=True,
+              help="Single-agent baseline: one agent audits the whole repo, no orchestration "
+                   "(big context + output budget). Ignores --interface.")
 @click.option("--service-tier", type=click.Choice(["priority", "flex"]), default="priority")
 @click.option("--background/--no-background", default=None,
               help="Background submit-then-poll (defaults on for flex)")
@@ -191,7 +202,7 @@ def briefs():
               help="-v: per-call timing/tokens + dispatch plan + live failures. -vv: + tool calls")
 @click.option("--dry-run", is_flag=True, help="Build & print the plan; no API calls")
 def run(brief, repo_, path_, provider, model, worker_model, reasoning_effort, temperature,
-        interface, service_tier, background, max_files, max_agents, max_waves, max_steps,
+        interface, solo, service_tier, background, max_files, max_agents, max_waves, max_steps,
         max_rounds, max_files_per_worker, max_concurrent, timeout, verify_votes, no_verify,
         enable_search, output, verbose, dry_run):
     """Run a BRIEF over a repo/path (see `swarm briefs`)."""
@@ -213,12 +224,13 @@ def run(brief, repo_, path_, provider, model, worker_model, reasoning_effort, te
     cfg = _make_cfg(model_id, worker_model_id, interface, service_tier, background, max_files,
                     max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
                     max_concurrent, verify_votes, no_verify, search_enabled,
-                    reasoning_effort, temperature)
+                    reasoning_effort, temperature, solo)
     click.echo(f"Brief:   {b.name} — {b.description}")
     click.echo(f"Model:   {model_id}  (provider: {provider})"
                + (f"  (workers: {worker_model_id})" if worker_model_id else ""))
     click.echo(f"Target:  {slug}  ({len(files)} source files)")
-    click.echo(f"Mode:    {interface} interface · tier {service_tier} (background={background})")
+    mode = "solo (single agent, no orchestration)" if solo else f"{interface} interface"
+    click.echo(f"Mode:    {mode} · tier {service_tier} (background={background})")
     if dropped:
         shown = ", ".join(dropped[:10]) + (" ..." if len(dropped) > 10 else "")
         click.echo(f"NOTE: capped at {max_files} files; skipped {len(dropped)}: {shown}")
@@ -226,10 +238,16 @@ def run(brief, repo_, path_, provider, model, worker_model, reasoning_effort, te
     if dry_run:
         rtool = tools.submit_results_tool(b.result_key, b.result_schema, b.submit_description)
         click.echo("\n--- DRY RUN (no API calls) ---")
-        click.echo("Orchestrator: " + ", ".join(
-            t["name"] for t in tools.tools_for("orchestrator", interface=interface)))
-        click.echo("Worker:       " + ", ".join(t["name"] for t in tools.tools_for(
-            "worker", worker_tools=b.worker_tools, search_enabled=search_enabled, results_tool=rtool)))
+        if solo:
+            click.echo("Solo agent:   " + ", ".join(t["name"] for t in tools.tools_for(
+                "worker", worker_tools=b.worker_tools, search_enabled=search_enabled, results_tool=rtool)))
+            click.echo(f"Context:      up to {cfg.worker_context_chars:,} chars preloaded "
+                       f"(rest via read_file/grep) · {cfg.worker_max_output_tokens:,} output tokens")
+        else:
+            click.echo("Orchestrator: " + ", ".join(
+                t["name"] for t in tools.tools_for("orchestrator", interface=interface)))
+            click.echo("Worker:       " + ", ".join(t["name"] for t in tools.tools_for(
+                "worker", worker_tools=b.worker_tools, search_enabled=search_enabled, results_tool=rtool)))
         vtools = (", ".join(t["name"] for t in tools.tools_for(
             "verifier", verifier_tools=b.verifier_tools, search_enabled=search_enabled))
             + (f"  (×{verify_votes} votes)" if verify_votes > 1 else "")

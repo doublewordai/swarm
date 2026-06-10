@@ -80,6 +80,19 @@ decomposes by **scope** (the orchestrator assigns directories, the harness pre-l
 faster and more deterministic for large code repos, at the cost of matching the trained
 schema exactly.
 
+### Single-agent baseline (`--solo`)
+
+`--solo` is the paper's comparison point: **one** agent, no orchestration, the whole repo
+in one large context (preloaded up to a big budget, the rest reachable via
+`read_file`/`grep`), emitting all findings in one `submit_results`. The verify and
+synthesize stages are unchanged, so `findings.json` / `report.md` are byte-identical in
+shape to a swarm run — the *only* variable is orchestration + parallelism. Point both at
+the same repo and compare findings, latency, tokens, and the critical/total step counts
+to see what the swarm buys you (the paper reports single-agent 60.6 → swarm 78.4 on
+BrowseComp, 3–4.5× faster). Add `--no-verify` for a literally-one-agent run; note that on
+a repo larger than the context window the solo agent leans on `read_file` for the tail,
+and a whole-repo audit can bump the output-token ceiling.
+
 **Failure is loud.** A dead orchestrator call, or a run that dispatches zero workers,
 raises `SwarmError` and exits non-zero — it never ships a vacuous report. A failed
 synthesis writes the structured results and exits non-zero with a clear message; failed
@@ -249,6 +262,8 @@ on the first call.
 - **Provider & models:** `--provider doubleword|openai` · `-m/--model` ·
   `--worker-model` (cheap workers, strong orchestrator/synthesizer — the runtime analogue
   of the paper's "train the orchestrator with small sub-agents first").
+- **Mode:** `--interface structured|kimi` · `--solo` (single-agent baseline, no
+  orchestration; ignores `--interface`).
 - **Request params:** `--reasoning-effort minimal|low|medium|high|none` ·
   `--temperature <float>|none` (omit for models that reject it).
 - **Tiers:** `--service-tier priority|flex` · `--background/--no-background` ·

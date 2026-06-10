@@ -257,3 +257,33 @@ def test_none_values_omit_params(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert seen["effort"] is None
     assert seen["temp"] == "omit"
+
+
+def test_solo_dryrun_shows_solo_mode(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path), "--solo",
+                                 "--dry-run", "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert "solo" in r.output.lower()
+    assert "dispatch_workers" not in r.output     # no orchestration in solo
+
+
+def test_solo_flows_to_cfg_with_big_context(tmp_path, monkeypatch):
+    from src import responses as R
+    seen = {}
+    monkeypatch.setattr(R, "make_client", lambda provider="doubleword", timeout=600.0: object())
+
+    def capture(client, b, root, files, cfg, **k):
+        seen["solo"] = cfg.solo
+        seen["ctx"] = cfg.worker_context_chars
+        seen["out"] = cfg.worker_max_output_tokens
+        return _fake_res([])
+
+    monkeypatch.setattr("src.cli.engine.run_swarm", capture)
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path), "--solo",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["solo"] is True
+    assert seen["ctx"] >= 1_000_000               # bumped for a big single context
+    assert seen["out"] > 8192                      # room to emit many findings at once
