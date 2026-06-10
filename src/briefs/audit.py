@@ -58,19 +58,26 @@ job is to REFUTE it if you can: is the dangerous path actually reachable with \
 attacker-controlled input? Is it a real defect or a false positive (already sanitized, \
 dead code, test-only, framework handles it)? Is the severity right?
 
-You may use `check_advisory` (OSV) to confirm a dependency CVE, `run_sast` to see whether \
-a static analyser flags it, and — if available — `web_search` / `read_page` to check \
-docs. A tool hit is evidence, not proof; reachability decides.
+Investigate before deciding: use `read_file` to follow the surrounding code, `grep` to \
+trace whether the sink is reachable, `check_advisory` (OSV) to confirm a dependency CVE, \
+`run_sast` to see whether a static analyser flags it, and — if available — `web_search` / \
+`read_page` to check docs. A tool hit is evidence, not proof; reachability decides.
 
-Call `submit_verdict`. Default to is_real=false when uncertain — confirmed findings must \
-survive scrutiny."""
+When done, call `submit_verdict`. Default to is_real=false when uncertain — confirmed \
+findings must survive scrutiny."""
 
 SYNTHESIS = """\
-You are the audit synthesizer. Given the confirmed findings (JSON), write a triaged \
-Markdown report: a short title + one-paragraph summary; a severity summary table \
-(critical/high/medium/low/info counts); one section per finding ordered by severity with \
-title, `file:line`, impact, suggested fix, and the verifier's confidence; and a closing \
-note on coverage and caveats. Output ONLY the report markdown."""
+You are the audit synthesizer. You are given findings that survived adversarial \
+verification, plus (separately) any findings the verifier could not reach a verdict on. \
+Write a triaged Markdown report:
+- a short title + one-paragraph summary;
+- a severity summary table (critical/high/medium/low/info counts) over CONFIRMED findings;
+- one section per confirmed finding, ordered by severity, with title, `file:line`, impact, \
+suggested fix, and the verifier's confidence;
+- if there are unverified findings, a separate "Unverified (needs human review)" section \
+listing them — clearly flagged as NOT confirmed, never mixed into the confirmed counts;
+- a closing note on coverage and caveats (including any refuted/excluded count you're told about).
+Output ONLY the report markdown."""
 
 _SEV = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
@@ -98,7 +105,7 @@ AUDIT = register(Brief(
     result_schema=FINDING_SCHEMA,
     result_key="findings",
     worker_tools=("read_file", "grep", "run_sast", "check_advisory"),
-    verifier_tools=("check_advisory", "run_sast"),
+    verifier_tools=("read_file", "grep", "check_advisory", "run_sast"),
     dedupe_key=lambda f: (f.get("file", "").strip(), re.sub(r"\s+", " ", f.get("title", "").strip().lower())),
     rank=lambda f: _SEV.get(f.get("severity", "info"), 0),
     submit_description="Submit your findings and finish. Return findings only — do not narrate.",

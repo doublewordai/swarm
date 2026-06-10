@@ -12,7 +12,44 @@ import json
 from . import advisory, repo, sast, search
 
 DEFERRED = "__DEFERRED__"
-_DEFERRED_NAMES = {"dispatch_workers", "submit_results", "submit_verdict"}
+_DEFERRED_NAMES = {"dispatch_workers", "submit_results", "submit_verdict",
+                   "create_subagent", "assign_task"}
+
+# Kimi's trained swarm interface (K2.5 tech report, Appendix E.8). Schemas kept as
+# close to the published ones as possible so K2.5/K2.6 runs ride the PARL-trained
+# prior; `files` on assign_task is our one extension (preloads bounded context).
+CREATE_SUBAGENT = {
+    "type": "function",
+    "name": "create_subagent",
+    "description": "Create a custom subagent with specific system prompt and name for reuse.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Unique name for this agent configuration"},
+            "system_prompt": {"type": "string",
+                              "description": "System prompt defining the agent's role, capabilities, and boundaries"},
+        },
+        "required": ["name", "system_prompt"],
+    },
+}
+ASSIGN_TASK = {
+    "type": "function",
+    "name": "assign_task",
+    "description": ("Launch a new agent.\nUsage notes:\n"
+                    "1. You can launch multiple agents concurrently whenever possible, "
+                    "to maximize performance;\n"
+                    "2. When the agent is done, it will return a single message back to you."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "string", "description": "Specify which created agent to use."},
+            "prompt": {"type": "string", "description": "The task for the agent to perform"},
+            "files": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional repo-relative files to preload into the agent's context"},
+        },
+        "required": ["agent", "prompt"],
+    },
+}
 
 DISPATCH_WORKERS = {
     "type": "function",
@@ -108,11 +145,16 @@ def submit_results_tool(result_key: str, item_schema: dict, description: str) ->
     }
 
 
-def tools_for(role: str, *, worker_tools=(), verifier_tools=(), search_enabled=False,
-              results_tool=None) -> list[dict]:
-    """Assemble the flat tool schemas for a role from brief-selected capability names."""
+def tools_for(role: str, *, interface="structured", worker_tools=(), verifier_tools=(),
+              search_enabled=False, results_tool=None) -> list[dict]:
+    """Assemble the flat tool schemas for a role from brief-selected capability names.
+
+    The orchestrator always gets read_file/grep so it can probe the target before
+    and between dispatches (deciding *whether/how* to parallelize, not only doing it).
+    """
     if role == "orchestrator":
-        return [DISPATCH_WORKERS]
+        dispatch = [CREATE_SUBAGENT, ASSIGN_TASK] if interface == "kimi" else [DISPATCH_WORKERS]
+        return dispatch + [READ_FILE, GREP]
 
     def pick(names):
         return [_REGISTRY[n] for n in names

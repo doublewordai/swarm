@@ -13,7 +13,26 @@ def test_tools_for_roles():
     assert w == {"read_file", "grep", "run_sast", "check_advisory", "submit_results"}
     v = {t["name"] for t in tools.tools_for("verifier", verifier_tools=("check_advisory", "run_sast"))}
     assert v == {"check_advisory", "run_sast", "submit_verdict"}
-    assert [t["name"] for t in tools.tools_for("orchestrator")] == ["dispatch_workers"]
+
+
+def test_orchestrator_tools_structured_interface():
+    # The orchestrator can probe the repo before/between waves, not only delegate.
+    names = {t["name"] for t in tools.tools_for("orchestrator")}
+    assert names == {"dispatch_workers", "read_file", "grep"}
+
+
+def test_orchestrator_tools_kimi_interface():
+    # Kimi's trained interface (K2.5 tech report, Appendix E.8).
+    names = {t["name"] for t in tools.tools_for("orchestrator", interface="kimi")}
+    assert names == {"create_subagent", "assign_task", "read_file", "grep"}
+    by_name = {t["name"]: t for t in tools.tools_for("orchestrator", interface="kimi")}
+    assert by_name["create_subagent"]["parameters"]["required"] == ["name", "system_prompt"]
+    assert by_name["assign_task"]["parameters"]["required"] == ["agent", "prompt"]
+
+
+def test_kimi_tools_are_deferred():
+    assert tools.execute_tool("create_subagent", "{}", root=ROOT) == tools.DEFERRED
+    assert tools.execute_tool("assign_task", "{}", root=ROOT) == tools.DEFERRED
 
 
 def test_search_tools_are_opt_in():

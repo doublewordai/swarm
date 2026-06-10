@@ -5,6 +5,7 @@ description = "Doubleword Agent Swarm — a self-designing agent swarm on the Op
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1.0",
+    "jsonschema>=4.21.0",
     "openai>=1.99.0",
     "requests>=2.31.0",
 ]
