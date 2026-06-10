@@ -497,3 +497,149 @@ def test_default_map_budget_bounds_orchestrator_input(tmp_path):
     assert len(m) <= budget             # bounded input
     assert all(f in m for f in files)   # every file still listed
     assert "line_0 " not in m           # large repo degraded away from full headers
+
+
+# --- structured events for verbose logging -----------------------------------
+
+
+def _events_of(monkeypatch, tmp_path, seq, cfg=None):
+    events = []
+    _capture(monkeypatch, seq)
+    res = engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["a.py"],
+                           cfg or engine.SwarmConfig(model="m", verify=False),
+                           on_event=lambda k, m, data=None: events.append((k, m, data)))
+    return events, res
+
+
+def test_emits_per_call_events_with_timing_and_role(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    return run_command()\n")
+    events, _ = _events_of(monkeypatch, tmp_path, [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"findings": [FINDING]})],
+        [_text("done")],
+        [_text("# Audit")],
+    ])
+    calls = [d for k, _, d in events if k == "call"]
+    roles = {c["role"] for c in calls}
+    assert {"orchestrator", "worker", "synth"} <= roles
+    for c in calls:
+        assert "elapsed_s" in c and "tokens" in c and "finish" in c and "agent" in c
+
+
+def test_call_event_carries_tool_calls_for_vv(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    return run_command()\n")
+    events, _ = _events_of(monkeypatch, tmp_path, [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("grep", {"pattern": "run_command"})],
+        [_fc("submit_results", {"findings": [FINDING]})],
+        [_text("done")],
+        [_text("# Audit")],
+    ], cfg=engine.SwarmConfig(model="m", verify=False, max_rounds=3))
+    worker_calls = [d for k, _, d in events if k == "call" and d["role"] == "worker"]
+    assert any("grep" in c.get("tool_calls", []) for c in worker_calls)
+
+
+def test_emits_plan_event_with_team(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    events, _ = _events_of(monkeypatch, tmp_path, [
+        [_fc("dispatch_workers", {"workers": [
+            {"role": "auth", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"findings": []})],
+        [_text("done")],
+        [_text("# Audit")],
+    ])
+    plans = [d for k, _, d in events if k == "plan"]
+    assert plans and plans[0]["workers"][0]["role"] == "auth"
+    assert plans[0]["workers"][0]["n_files"] == 1
+
+
+def test_failed_call_emitted_as_event(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    events, _ = _events_of(monkeypatch, tmp_path, [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_failed("worker boom")],
+        [_text("done")],
+        [_text("# Audit")],
+    ])
+    failed = [d for k, _, d in events if k == "call" and d["finish"] == "error"]
+    assert failed and failed[0]["role"] == "worker"
+
+
+def test_on_event_back_compat_two_arg_handler(monkeypatch, tmp_path):
+    # Handlers that only accept (kind, msg) must still work.
+    (tmp_path / "a.py").write_text("x = 1\n")
+    seen = []
+    _capture(monkeypatch, [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"findings": []})],
+        [_text("done")],
+        [_text("# Audit")],
+    ])
+    res = engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["a.py"],
+                           engine.SwarmConfig(model="m", verify=False),
+                           on_event=lambda k, m: seen.append((k, m)))
+    assert any(k == "wave" for k, _ in seen)
+
+
+# --- kimi flow alignment: task dispatch + worker self-discovery ---------------
+
+
+def test_kimi_assign_task_schema_is_agent_prompt_only():
+    from src import tools as T
+    props = T.ASSIGN_TASK["parameters"]["properties"]
+    assert set(props) == {"agent", "prompt"}        # paper E.8: no files/paths
+    assert T.ASSIGN_TASK["parameters"]["required"] == ["agent", "prompt"]
+
+
+def test_kimi_worker_self_gathers_no_preloaded_files(monkeypatch, tmp_path):
+    (tmp_path / "auth.py").write_text("SECRET = 'preloaded-marker'\n")
+    captured = _capture(monkeypatch, [
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [
+              {"type": "function_call", "call_id": "k1", "name": "create_subagent",
+               "arguments": json.dumps({"name": "a", "system_prompt": "Audit it."})},
+              {"type": "function_call", "call_id": "k2", "name": "assign_task",
+               "arguments": json.dumps({"agent": "a", "prompt": "audit the auth code"})}]}],
+        # worker discovers the file itself, then submits
+        [_fc("read_file", {"path": "auth.py"})],
+        [_fc("submit_results", {"findings": [FINDING]})],
+        [_text("done")],
+        [_fc("submit_verdict", {"is_real": True, "confidence": 0.9, "reasoning": "y"})],
+        [_text("# Audit")],
+    ])
+    res = engine.run_swarm(None, get_brief("audit"), str(tmp_path), ["auth.py"],
+                           engine.SwarmConfig(model="m", interface="kimi"))
+    worker_system = captured[1][0]["input_items"][0]["content"]
+    worker_user = captured[1][0]["input_items"][1]["content"]
+    assert "preloaded-marker" not in (worker_system + worker_user)  # contents NOT pre-loaded
+    assert "auth.py" in worker_system                    # listed as discoverable (corpus)
+    assert "read_file" in worker_system                  # told to self-gather
+    assert "audit the auth code" in worker_user          # free-text task
+    # coverage reflects what the worker actually read, not a pre-assignment
+    assert res["coverage"] == {"assigned": 1, "total": 1}
+
+
+def test_kimi_worker_gets_discovery_tools_even_if_brief_omits_them(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    # a brief whose worker_tools lack read_file/grep
+    from src.briefs import Brief, register
+    register(Brief(
+        name="_kimi_probe", description="t", orchestrator_prompt="o", worker_prompt="w",
+        synthesis_prompt="s", result_schema={"type": "object", "properties": {"x": {"type": "string"}},
+                                              "required": ["x"]},
+        result_key="rows", worker_tools=("run_sast",)))
+    captured = _capture(monkeypatch, [
+        [{"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+          "output": [
+              {"type": "function_call", "call_id": "k1", "name": "create_subagent",
+               "arguments": json.dumps({"name": "a", "system_prompt": "go"})},
+              {"type": "function_call", "call_id": "k2", "name": "assign_task",
+               "arguments": json.dumps({"agent": "a", "prompt": "do it"})}]}],
+        [_fc("submit_results", {"rows": []})],
+        [_text("done")],
+        [_text("# R")],
+    ])
+    engine.run_swarm(None, get_brief("_kimi_probe"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m", interface="kimi"))
+    worker_tool_names = {t["name"] for t in captured[1][0]["tools"]}
+    assert {"read_file", "grep"} <= worker_tool_names

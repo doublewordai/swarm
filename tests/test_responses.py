@@ -168,6 +168,25 @@ def test_poll_returns_failed_on_persistent_retrieve_error(monkeypatch):
     assert "resp_x" == out["id"]
 
 
+def test_dispatch_attaches_elapsed_realtime(monkeypatch):
+    monkeypatch.setattr(R, "call", lambda client, **kw: {
+        "status": "completed", "output": [], "usage": {"input_tokens": 1, "output_tokens": 1}})
+    out = R.dispatch(None, [{"model": "m", "input_items": []}],
+                     service_tier="priority", background=False)
+    assert isinstance(out[0]["_elapsed_s"], float)
+
+
+def test_dispatch_attaches_elapsed_on_failure(monkeypatch):
+    def boom(client, **kw):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(R, "call", boom)
+    out = R.dispatch(None, [{"model": "m", "input_items": []}],
+                     service_tier="priority", background=False)
+    assert out[0]["status"] == "failed"
+    assert "_elapsed_s" in out[0]
+
+
 def test_dispatch_blocking_uses_call(monkeypatch):
     seen = []
 

@@ -64,12 +64,21 @@ focus, files}])` and the harness builds each worker's bounded context. Simple an
 predictable.
 
 `--interface kimi` — the interface Kimi K2.5/K2.6 were **RL-trained on** (K2.5 tech
-report, Appendix E.8): `create_subagent(name, system_prompt)` lets the orchestrator
-**author each specialist's system prompt** and register it for reuse, then
-`assign_task(agent, prompt, files?)` dispatches tasks — multiple calls in one turn run in
-parallel. The brief's result schema and submit contract are appended to the
-model-authored prompt, so output stays structured. This matches the PARL training
-distribution; the harness still enforces context bounds and schema validation.
+report, Appendix E.8), kept **schema-faithful**: `create_subagent(name, system_prompt)`
+lets the orchestrator **author each specialist's system prompt** and register it for
+reuse, then `assign_task(agent, prompt)` dispatches a free-text task — multiple calls in
+one turn run in parallel. As in the paper, the sub-agent then **gathers its own context**
+(it's given the repo's file listing and uses `read_file`/`grep` to read what its task
+needs) rather than receiving harness-assigned files. The brief's result schema and submit
+contract are appended to the model-authored prompt, so output stays structured. This is
+the literal trained tool surface (`{agent, prompt}`, no extra fields), so K2.5/K2.6 run on
+their PARL prior; the harness still enforces context bounds and schema validation.
+
+The two interfaces embody the paper's two faithful-vs-pragmatic readings: `kimi`
+decomposes by **task** (sub-agent self-discovers scope, as trained); `structured`
+decomposes by **scope** (the orchestrator assigns directories, the harness pre-loads) —
+faster and more deterministic for large code repos, at the cost of matching the trained
+schema exactly.
 
 **Failure is loud.** A dead orchestrator call, or a run that dispatches zero workers,
 raises `SwarmError` and exits non-zero — it never ships a vacuous report. A failed
@@ -87,9 +96,10 @@ this harness *is* that scaffolding. It reproduces four principles:
 1. **Self-designing orchestrator** — the model chooses the team and the decomposition,
    and (`--interface kimi`) authors each sub-agent's system prompt via the trained
    `create_subagent`/`assign_task` interface.
-2. **Bounded local context + route-back** — workers are isolated, preloaded within a
-   context budget, and return only schema-valid results; per-worker status routes back so
-   the orchestrator can fill gaps.
+2. **Bounded local context + route-back** — workers are isolated and return only
+   schema-valid results; per-worker status routes back so the orchestrator can fill gaps.
+   In `structured` mode the harness pre-loads each worker's file slice (within a context
+   budget); in `kimi` mode the worker self-gathers via `read_file`/`grep`, as in the paper.
 3. **Structural anti-groupthink** — an independent verifier panel (majority vote) refutes
    before reconciliation; unverified items are flagged, not dropped.
 4. **Synthesis** — one pass reconciles confirmed and unverified results.
@@ -221,6 +231,9 @@ full `model_name` Doubleword serves — Kimi K2.6 is just the default, not a har
   worker/verifier) · `--max-files-per-worker` (oversized specs split engine-side).
 - **Verify & search:** `--verify-votes N` (panel size, majority vote) · `--no-verify` ·
   `--enable-search` (else on iff `SERPER_API_KEY` set).
+- **Logging:** `-v` shows a per-call line (role, agent, elapsed, tokens, finish) plus the
+  orchestrator's dispatch plan and any failed call live; `-vv` adds each agent's tool
+  calls. This is the fastest way to see *which* call is slow (e.g. the orchestrator turn).
 - `--dry-run` — print the plan (resolved tools per role, repo map) with no API calls.
 
 Per-model token usage, cost (summed across orchestrator/worker models), coverage, and the

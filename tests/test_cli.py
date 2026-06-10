@@ -107,3 +107,67 @@ def test_nonfatal_errors_warn_but_exit_zero(tmp_path, monkeypatch):
                                  "-o", str(tmp_path / "out")])
     assert r.exit_code == 0, r.output
     assert "WARNING" in r.output and "worker call(s) failed" in r.output
+
+
+def _run_seq(tmp_path):
+    """A minimal mocked dispatch sequence: dispatch -> worker grep+submit -> stop -> verify -> synth."""
+    import json as _j
+    (tmp_path / "a.py").write_text("def f():\n    return run_command()\n")
+
+    def fc(name, args, cid="c"):
+        return {"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+                "_elapsed_s": 1.23,
+                "output": [{"type": "function_call", "call_id": cid, "name": name,
+                            "arguments": _j.dumps(args)}]}
+
+    def txt(t):
+        return {"status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1},
+                "_elapsed_s": 0.5,
+                "output": [{"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": t}]}]}
+
+    return iter([
+        [fc("dispatch_workers", {"workers": [{"role": "auth", "focus": "f", "files": ["a.py"]}]})],
+        [fc("grep", {"pattern": "run_command"})],
+        [fc("submit_results", {"findings": [{"severity": "high", "title": "x", "file": "a.py",
+                                             "line": 2, "description": "d", "confidence": 0.9}]})],
+        [txt("done")],
+        [fc("submit_verdict", {"is_real": True, "confidence": 0.9, "reasoning": "y"})],
+        [txt("# Audit")],
+    ])
+
+
+def _invoke(tmp_path, monkeypatch, extra_args):
+    from src import responses as R
+    seq = _run_seq(tmp_path)
+    monkeypatch.setattr(R, "dispatch", lambda *a, **k: next(seq))
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+    return CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                    "-o", str(tmp_path / "out")] + extra_args)
+
+
+def test_default_verbosity_hides_per_call_lines(tmp_path, monkeypatch):
+    r = _invoke(tmp_path, monkeypatch, [])
+    assert r.exit_code == 0, r.output
+    assert "tok  " not in r.output            # no per-call timing line at v=0
+    assert "[plan]" not in r.output           # no plan at v=0
+    assert "[wave]" in r.output               # headline events still shown
+
+
+def test_v_shows_timing_tokens_and_plan(tmp_path, monkeypatch):
+    r = _invoke(tmp_path, monkeypatch, ["-v"])
+    assert r.exit_code == 0, r.output
+    assert "tok" in r.output                  # per-call token count
+    assert "1.2" in r.output                  # elapsed seconds rendered
+    assert "[plan]" in r.output and "auth" in r.output   # dispatch plan shows the team
+
+
+def test_vv_shows_tool_calls(tmp_path, monkeypatch):
+    r = _invoke(tmp_path, monkeypatch, ["-vv"])
+    assert r.exit_code == 0, r.output
+    assert "grep" in r.output                 # worker's tool call traced at -vv
+
+
+def test_v_not_shown_tool_calls(tmp_path, monkeypatch):
+    r = _invoke(tmp_path, monkeypatch, ["-v"])
+    assert "grep" not in r.output             # tool tracing is -vv only
