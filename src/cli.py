@@ -92,8 +92,8 @@ def briefs():
 @click.option("--service-tier", type=click.Choice(["priority", "flex"]), default="priority")
 @click.option("--background/--no-background", default=None,
               help="Background submit-then-poll (defaults on for flex)")
-@click.option("--max-files", default=40, help="Cap on source files")
-@click.option("--max-agents", default=12, help="Cap on parallel workers")
+@click.option("--max-files", default=500, help="Cap on source files")
+@click.option("--max-agents", default=100, help="Cap on parallel workers")
 @click.option("--max-waves", default=2, help="Max orchestrator dispatch waves")
 @click.option("--max-rounds", default=3, help="Max tool rounds per worker")
 @click.option("--no-verify", is_flag=True, help="Skip the verifier stage (if the brief has one)")

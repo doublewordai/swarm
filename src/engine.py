@@ -36,8 +36,8 @@ class SwarmConfig:
     model: str
     service_tier: str = "priority"
     background: bool = False
-    max_agents: int = 12
-    max_files: int = 40
+    max_agents: int = 100
+    max_files: int = 500
     max_waves: int = 2
     max_rounds: int = 3
     verify: bool = True
