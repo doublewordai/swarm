@@ -71,12 +71,20 @@ class SwarmConfig:
     verify: bool = True
     verify_votes: int = 1                # verifiers per item; majority decides
     orchestrator_temperature: float = 0.3
-    reasoning_effort: str = "minimal"
+    # None → role defaults (0; orchestrator 0.3); a float → that value for every role;
+    # "omit" → don't send the parameter at all (gpt-5-class models reject temperature).
+    temperature: float | str | None = None
+    reasoning_effort: str | None = "minimal"  # None → don't send reasoning.effort
     search_enabled: bool = False
     max_concurrent: int = 12             # parallel in-flight requests per dispatch
 
     def agent_model(self) -> str:
         return self.worker_model or self.model
+
+    def resolved_temperature(self, role_default: float) -> float | None:
+        if self.temperature == "omit":
+            return None
+        return self.temperature if self.temperature is not None else role_default
 
 
 # --- bounded local context builders ----------------------------------------
@@ -215,8 +223,10 @@ def _split_specs(specs: list[dict], max_files: int) -> list[dict]:
 
 def _req(model, input_items, tools_=None, temperature=0, max_output_tokens=8192,
          reasoning_effort="minimal", tool_choice=None):
-    r = {"model": model, "input_items": input_items, "temperature": temperature,
+    r = {"model": model, "input_items": input_items,
          "max_output_tokens": max_output_tokens, "reasoning_effort": reasoning_effort}
+    if temperature is not None:  # None ⇒ omit (some models reject the parameter)
+        r["temperature"] = temperature
     if tools_:
         r["tools"] = tools_
     if tool_choice:
@@ -345,6 +355,7 @@ def _run_pool(client, pool: list[Agent], tools_: list[dict], terminal: str, on_t
         if not active:
             break
         reqs = [_req(a.model, a.input_items, tools_=tools_,
+                     temperature=cfg.resolved_temperature(0),
                      reasoning_effort=cfg.reasoning_effort) for a in active]
         for a, resp in zip(active, _dispatch(client, reqs, cfg)):
             consume(a, resp)
@@ -356,6 +367,7 @@ def _run_pool(client, pool: list[Agent], tools_: list[dict], terminal: str, on_t
                                   "content": _FORCE_MSG.format(name=terminal)})
         reqs = [_req(a.model, a.input_items, tools_=tools_,
                      tool_choice={"type": "function", "name": terminal},
+                     temperature=cfg.resolved_temperature(0),
                      reasoning_effort=cfg.reasoning_effort) for a in stragglers]
         for a, resp in zip(stragglers, _dispatch(client, reqs, cfg)):
             consume(a, resp, forced=True)
@@ -481,7 +493,7 @@ def _orchestrator_agent(brief: Brief, cfg: SwarmConfig, repo_map: str, n_files: 
 
 def _orch_turn(client, orch: Agent, otools, cfg, tokens, steps, emit=lambda *a: None) -> dict:
     resp = _dispatch(client, [_req(cfg.model, orch.input_items, tools_=otools,
-                                   temperature=cfg.orchestrator_temperature,
+                                   temperature=cfg.resolved_temperature(cfg.orchestrator_temperature),
                                    max_output_tokens=cfg.orchestrator_max_output_tokens,
                                    reasoning_effort=cfg.reasoning_effort)], cfg)[0]
     _add_tokens(tokens, resp, cfg.model)
@@ -760,6 +772,7 @@ def _synthesize(client, brief, cfg, tokens, steps, n_files, confirmed, unverifie
         {"type": "message", "role": "user", "content": "\n\n".join(parts)},
     ]
     sresp = _dispatch(client, [_req(cfg.model, synth_input, max_output_tokens=16384,
+                                    temperature=cfg.resolved_temperature(0),
                                     reasoning_effort=cfg.reasoning_effort)], cfg)[0]
     _add_tokens(tokens, sresp, cfg.model)
     steps["critical"] += 1

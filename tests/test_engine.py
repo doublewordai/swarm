@@ -643,3 +643,45 @@ def test_kimi_worker_gets_discovery_tools_even_if_brief_omits_them(monkeypatch, 
                      engine.SwarmConfig(model="m", interface="kimi"))
     worker_tool_names = {t["name"] for t in captured[1][0]["tools"]}
     assert {"read_file", "grep"} <= worker_tool_names
+
+
+# --- request parameter overrides (provider compatibility) ---------------------
+
+
+def _minimal_seq():
+    return [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"sections": [{"title": "t", "purpose": "p"}]})],
+        [_text("done")],
+        [_text("# Guide")],
+    ]
+
+
+def test_temperature_override_applies_to_all_roles(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = _capture(monkeypatch, _minimal_seq())
+    engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m", temperature=0.7))
+    for batch in captured:
+        for req in batch:
+            assert req["temperature"] == 0.7
+
+
+def test_temperature_omit_drops_param_everywhere(monkeypatch, tmp_path):
+    # gpt-5-class models 400 on any temperature — "omit" must remove the key.
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = _capture(monkeypatch, _minimal_seq())
+    engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m", temperature="omit"))
+    for batch in captured:
+        for req in batch:
+            assert "temperature" not in req
+
+
+def test_temperature_default_keeps_role_defaults(monkeypatch, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = _capture(monkeypatch, _minimal_seq())
+    engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py"],
+                     engine.SwarmConfig(model="m"))
+    assert captured[0][0]["temperature"] == 0.3   # orchestrator
+    assert captured[1][0]["temperature"] == 0     # worker

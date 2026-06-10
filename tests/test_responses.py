@@ -199,3 +199,24 @@ def test_dispatch_blocking_uses_call(monkeypatch):
                      service_tier="priority", background=False)
     assert len(out) == 1 and out[0]["status"] == "completed"
     assert seen[0]["service_tier"] == "priority" and seen[0]["background"] is False
+
+
+def test_call_omits_temperature_when_none(monkeypatch):
+    sent = {}
+
+    class _FakeResponses:
+        def create(self, **body):
+            sent.update(body)
+
+            class _R:
+                @staticmethod
+                def model_dump():
+                    return {"status": "completed", "output": [], "usage": {}}
+
+            return _R()
+
+    client = type("C", (), {"responses": _FakeResponses()})()
+    R.call(client, model="m", input_items=[], temperature=None)
+    assert "temperature" not in sent
+    R.call(client, model="m", input_items=[], temperature=0)
+    assert sent["temperature"] == 0

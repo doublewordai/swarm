@@ -166,10 +166,11 @@ def call(
     body = {
         "model": model,
         "input": input_items,
-        "temperature": temperature,
         "max_output_tokens": max_output_tokens,
         "service_tier": service_tier,
     }
+    if temperature is not None:  # omit when None — some models reject any temperature
+        body["temperature"] = temperature
     if tools:
         body["tools"] = tools  # flat function tools, per spec
     if tool_choice:
