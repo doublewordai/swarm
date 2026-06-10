@@ -32,6 +32,9 @@ CREATE_SUBAGENT = {
         "required": ["name", "system_prompt"],
     },
 }
+# Verbatim from the K2.5 tech report (Appendix E.8) — schema kept literal so K2.5/K2.6
+# ride their PARL-trained prior: the orchestrator dispatches a free-text task and the
+# sub-agent gathers its own context with its tools (no harness-assigned files).
 ASSIGN_TASK = {
     "type": "function",
     "name": "assign_task",
@@ -44,11 +47,6 @@ ASSIGN_TASK = {
         "properties": {
             "agent": {"type": "string", "description": "Specify which created agent to use."},
             "prompt": {"type": "string", "description": "The task for the agent to perform"},
-            "paths": {"type": "array", "items": {"type": "string"},
-                      "description": "Optional repo-relative directories to preload "
-                                     "(expanded to all files under them)"},
-            "files": {"type": "array", "items": {"type": "string"},
-                      "description": "Optional specific repo-relative files to preload into the agent's context"},
         },
         "required": ["agent", "prompt"],
     },
