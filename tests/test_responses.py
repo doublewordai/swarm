@@ -1,4 +1,17 @@
+import threading
+import time
+
+import httpx
+import pytest
+from openai import APIStatusError, RateLimitError
+
 from src import responses as R
+
+
+def _status_error(code: int) -> APIStatusError:
+    resp = httpx.Response(code, request=httpx.Request("POST", "http://test"))
+    cls = RateLimitError if code == 429 else APIStatusError
+    return cls("boom", response=resp, body=None)
 
 MSG_RESP = {
     "id": "resp_1", "status": "completed", "model": "moonshotai/Kimi-K2.6",
@@ -37,6 +50,110 @@ def test_finish_of():
     assert R.finish_of(MSG_RESP) == "stop"
     assert R.finish_of(TOOL_RESP) == "tool_calls"
     assert R.finish_of(LEN_RESP) == "length"
+
+
+def test_retry_gives_up_immediately_on_client_error():
+    """A 4xx (e.g. context overflow) is deterministic — retrying just wastes time."""
+    calls = {"n": 0}
+
+    @R._retry
+    def always_400():
+        calls["n"] += 1
+        raise _status_error(400)
+
+    with pytest.raises(APIStatusError):
+        always_400()
+    assert calls["n"] == 1
+
+
+def test_retry_retries_rate_limit(monkeypatch):
+    monkeypatch.setattr(R, "_RETRY_DELAY", 0.0)
+    calls = {"n": 0}
+
+    @R._retry
+    def flaky_429():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _status_error(429)
+        return "ok"
+
+    assert flaky_429() == "ok"
+    assert calls["n"] == 2
+
+
+def test_retry_retries_server_error(monkeypatch):
+    monkeypatch.setattr(R, "_RETRY_DELAY", 0.0)
+    calls = {"n": 0}
+
+    @R._retry
+    def flaky_500():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _status_error(500)
+        return "ok"
+
+    assert flaky_500() == "ok"
+    assert calls["n"] == 2
+
+
+def test_dispatch_bounds_concurrency(monkeypatch):
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0}
+
+    def fake_call(client, **kw):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return {"status": "completed", "output": [], "usage": {}}
+
+    monkeypatch.setattr(R, "call", fake_call)
+    out = R.dispatch(None, [{"model": "m", "input_items": []} for _ in range(6)],
+                     service_tier="priority", background=False, max_concurrent=2)
+    assert len(out) == 6
+    assert state["peak"] <= 2
+
+
+class _FlakyRetrieveClient:
+    """retrieve() raises a transient 500 once, then completes."""
+
+    def __init__(self, fail_times=1):
+        self.fails_left = fail_times
+        self.calls = 0
+
+        outer = self
+
+        class _Responses:
+            def retrieve(self, rid):
+                outer.calls += 1
+                if outer.fails_left > 0:
+                    outer.fails_left -= 1
+                    raise _status_error(500)
+
+                class _R:
+                    @staticmethod
+                    def model_dump():
+                        return {"id": rid, "status": "completed", "output": [], "usage": {}}
+
+                return _R()
+
+        self.responses = _Responses()
+
+
+def test_poll_survives_transient_retrieve_error(monkeypatch):
+    monkeypatch.setattr(R, "_RETRY_DELAY", 0.0)
+    out = R.poll(_FlakyRetrieveClient(fail_times=1), "resp_x", interval=0.0)
+    assert out["status"] == "completed"
+
+
+def test_poll_returns_failed_on_persistent_retrieve_error(monkeypatch):
+    """poll must degrade to a failed resp dict, not raise and not loop forever."""
+    monkeypatch.setattr(R, "_RETRY_DELAY", 0.0)
+    out = R.poll(_FlakyRetrieveClient(fail_times=99), "resp_x", interval=0.0)
+    assert out["status"] == "failed"
+    assert "resp_x" == out["id"]
 
 
 def test_dispatch_blocking_uses_call(monkeypatch):

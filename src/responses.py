@@ -66,6 +66,11 @@ def _retry(fn):
                 # Note: APITimeoutError is intentionally NOT retried — a timed-out
                 # call is usually a stalled/oversized generation; retrying repeats
                 # the stall. Let it propagate so dispatch records a failed resp.
+                # Non-429 4xx (bad request, context overflow, auth) are deterministic:
+                # retrying repeats the same failure, so give up immediately.
+                status = getattr(exc, "status_code", None)
+                if status is not None and 400 <= status < 500 and status != 429:
+                    raise
                 last = exc
                 if attempt < _MAX_RETRIES - 1:
                     time.sleep(_RETRY_DELAY * (attempt + 1))
@@ -173,12 +178,25 @@ def call(
     return client.responses.create(**body).model_dump()
 
 
-@_retry
 def poll(client, response_id, interval: float = 3.0, timeout: float = 1800) -> dict:
-    """Poll a background response until it reaches a terminal status."""
+    """Poll a background response until it reaches a terminal status.
+
+    Individual ``retrieve`` calls are retried (transient errors); the *overall*
+    timeout budget is never re-armed by a retry. Persistent retrieve failure
+    degrades to a failed resp dict — poll never raises.
+    """
+
+    @_retry
+    def _retrieve():
+        return client.responses.retrieve(response_id).model_dump()
+
     waited = 0.0
     while True:
-        resp = client.responses.retrieve(response_id).model_dump()
+        try:
+            resp = _retrieve()
+        except Exception as exc:  # noqa: BLE001 - degrade, never hang the swarm
+            return {"id": response_id, "status": "failed", "output": [], "usage": {},
+                    "_error": f"poll retrieve failed: {exc}"}
         if resp.get("status") in TERMINAL:
             return resp
         time.sleep(interval)
