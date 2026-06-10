@@ -287,3 +287,46 @@ def test_solo_flows_to_cfg_with_big_context(tmp_path, monkeypatch):
     assert seen["solo"] is True
     assert seen["ctx"] >= 1_000_000               # bumped for a big single context
     assert seen["out"] > 8192                      # room to emit many findings at once
+
+
+def _cfg_capture(monkeypatch):
+    from src import responses as R
+    seen = {}
+    monkeypatch.setattr(R, "make_client", lambda provider="doubleword", timeout=600.0: object())
+
+    def capture(client, b, root, files, cfg, **k):
+        seen["ctx"] = cfg.worker_context_chars
+        seen["out"] = cfg.worker_max_output_tokens
+        return _fake_res([])
+
+    monkeypatch.setattr("src.cli.engine.run_swarm", capture)
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+    return seen
+
+
+def test_context_chars_and_output_flags_override_solo_defaults(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    seen = _cfg_capture(monkeypatch)
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path), "--solo",
+                                 "--context-chars", "800000", "--max-output-tokens", "16384",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["ctx"] == 800_000 and seen["out"] == 16_384
+
+
+def test_context_chars_flag_applies_without_solo(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    seen = _cfg_capture(monkeypatch)
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--context-chars", "500000", "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["ctx"] == 500_000
+
+
+def test_solo_budget_defaults_unchanged_without_flags(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    seen = _cfg_capture(monkeypatch)
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path), "--solo",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert seen["ctx"] == 3_000_000 and seen["out"] == 32_768

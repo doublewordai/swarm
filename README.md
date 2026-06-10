@@ -93,6 +93,13 @@ BrowseComp, 3–4.5× faster). Add `--no-verify` for a literally-one-agent run; 
 a repo larger than the context window the solo agent leans on `read_file` for the tail,
 and a whole-repo audit can bump the output-token ceiling.
 
+Size the budget to your model with `--context-chars` (preload budget, ~4 chars/token) and
+`--max-output-tokens`; `--solo` defaults to 3M chars / 32k output, but e.g. a 256k-context
+model wants `--context-chars 800000`, a 1M model `--context-chars 3500000`. Both flags work
+in swarm mode too (they set the per-worker budget). Programmatically it's just
+`SwarmConfig(solo=True, worker_context_chars=…, worker_max_output_tokens=…)` — the CLI
+numbers are only defaults.
+
 **Failure is loud.** A dead orchestrator call, or a run that dispatches zero workers,
 raises `SwarmError` and exits non-zero — it never ships a vacuous report. A failed
 synthesis writes the structured results and exits non-zero with a clear message; failed
@@ -264,6 +271,8 @@ on the first call.
   of the paper's "train the orchestrator with small sub-agents first").
 - **Mode:** `--interface structured|kimi` · `--solo` (single-agent baseline, no
   orchestration; ignores `--interface`).
+- **Context budget:** `--context-chars` (per-agent preload, ~4 chars/token) ·
+  `--max-output-tokens` (per worker/verifier turn) — size them to your model's window.
 - **Request params:** `--reasoning-effort minimal|low|medium|high|none` ·
   `--temperature <float>|none` (omit for models that reject it).
 - **Tiers:** `--service-tier priority|flex` · `--background/--no-background` ·
