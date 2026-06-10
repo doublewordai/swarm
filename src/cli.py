@@ -43,6 +43,40 @@ def _prepare(repo_, path_, max_files, output):
     return root, slug, files, dropped
 
 
+def _event_printer(verbosity: int):
+    """Render the engine's event stream at a verbosity level.
+
+    0: headline events only (the dispatch/wave/verify/synthesize milestones).
+    1 (-v): + a per-call line (role, agent, elapsed, tokens, finish) and the
+            orchestrator's dispatch plan, plus any failed call shown live.
+    2 (-vv): + each agent's tool calls.
+    """
+    def render_call(data: dict) -> None:
+        el = data.get("elapsed_s")
+        el_s = f"{el:.1f}s" if isinstance(el, (int, float)) else "  ?  "
+        line = (f"    · {data.get('role', '?'):<12} {data.get('agent', ''):<14} "
+                f"{el_s:>7}  {data.get('tokens', 0):>8,} tok  {data.get('finish', '')}")
+        if data.get("error"):
+            line += f"  ERROR: {data['error']}"
+        click.echo(line)
+        if verbosity >= 2 and data.get("tool_calls"):
+            click.echo(f"        tools: {', '.join(data['tool_calls'])}")
+
+    def handler(kind, msg, data=None):
+        if kind == "call":
+            if verbosity >= 1 and data:
+                render_call(data)
+            return
+        if kind == "plan":
+            if verbosity >= 1 and data:
+                team = ", ".join(f"{w['role']}({w['n_files']}f)" for w in data.get("workers", []))
+                click.echo(f"  [plan] wave {data.get('wave', '?')}: {team}")
+            return
+        click.echo(f"  [{kind}] {msg}")
+
+    return handler
+
+
 def _cost_of(cfg, tk) -> dict:
     """Cost across all models used (orchestrator/synth on cfg.model, workers on worker_model)."""
     by_model = tk.get("by_model") or {cfg.model: tk}
@@ -130,10 +164,12 @@ def briefs():
 @click.option("--enable-search/--no-enable-search", default=None,
               help="Web-search grounding tools (default: on iff SERPER_API_KEY is set)")
 @click.option("-o", "--output", default="results/", help="Output directory")
+@click.option("-v", "--verbose", count=True,
+              help="-v: per-call timing/tokens + dispatch plan + live failures. -vv: + tool calls")
 @click.option("--dry-run", is_flag=True, help="Build & print the plan; no API calls")
 def run(brief, repo_, path_, model, worker_model, interface, service_tier, background,
         max_files, max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
-        max_concurrent, timeout, verify_votes, no_verify, enable_search, output, dry_run):
+        max_concurrent, timeout, verify_votes, no_verify, enable_search, output, verbose, dry_run):
     """Run a BRIEF over a repo/path (see `swarm briefs`)."""
     if bool(repo_) == bool(path_):
         raise click.UsageError("provide exactly one of --repo or --path")
@@ -177,8 +213,7 @@ def run(brief, repo_, path_, model, worker_model, interface, service_tier, backg
     client = R.make_client("doubleword", timeout=timeout)
     t0 = time.time()
     try:
-        res = engine.run_swarm(client, b, root, files, cfg,
-                               on_event=lambda kind, msg: click.echo(f"  [{kind}] {msg}"))
+        res = engine.run_swarm(client, b, root, files, cfg, on_event=_event_printer(verbose))
     except engine.SwarmError as exc:
         raise click.ClickException(f"swarm failed: {exc}")
     wall = time.time() - t0
