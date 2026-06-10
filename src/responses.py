@@ -28,7 +28,10 @@ PROVIDERS = {
 
 _MAX_RETRIES = 3
 _RETRY_DELAY = 1.0
-DEFAULT_TIMEOUT = 180.0  # seconds per request; a stalled call fails instead of hanging
+# Seconds per request. The orchestrator's decomposition turn on a large repo is a big
+# reasoning generation that legitimately runs into the minutes; too tight a timeout fails
+# the whole run. Still bounded so a truly stalled call fails instead of hanging forever.
+DEFAULT_TIMEOUT = 600.0
 
 
 def make_client(provider: str = "doubleword", timeout: float = DEFAULT_TIMEOUT) -> OpenAI:

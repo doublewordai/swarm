@@ -123,6 +123,8 @@ def briefs():
 @click.option("--max-rounds", default=3, help="Max tool rounds per worker/verifier")
 @click.option("--max-files-per-worker", default=30, help="Split worker specs larger than this")
 @click.option("--max-concurrent", default=12, help="Max in-flight requests per dispatch")
+@click.option("--timeout", default=R.DEFAULT_TIMEOUT, show_default=True,
+              help="Per-request timeout (s); raise for very large orchestrator turns")
 @click.option("--verify-votes", default=1, help="Verifiers per finding; majority decides")
 @click.option("--no-verify", is_flag=True, help="Skip the verifier stage (if the brief has one)")
 @click.option("--enable-search/--no-enable-search", default=None,
@@ -131,7 +133,7 @@ def briefs():
 @click.option("--dry-run", is_flag=True, help="Build & print the plan; no API calls")
 def run(brief, repo_, path_, model, worker_model, interface, service_tier, background,
         max_files, max_agents, max_waves, max_steps, max_rounds, max_files_per_worker,
-        max_concurrent, verify_votes, no_verify, enable_search, output, dry_run):
+        max_concurrent, timeout, verify_votes, no_verify, enable_search, output, dry_run):
     """Run a BRIEF over a repo/path (see `swarm briefs`)."""
     if bool(repo_) == bool(path_):
         raise click.UsageError("provide exactly one of --repo or --path")
@@ -172,7 +174,7 @@ def run(brief, repo_, path_, model, worker_model, interface, service_tier, backg
         click.echo(rmap[:2000])
         return
 
-    client = R.make_client("doubleword")
+    client = R.make_client("doubleword", timeout=timeout)
     t0 = time.time()
     try:
         res = engine.run_swarm(client, b, root, files, cfg,

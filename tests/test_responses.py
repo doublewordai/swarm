@@ -52,6 +52,18 @@ def test_finish_of():
     assert R.finish_of(LEN_RESP) == "length"
 
 
+def test_default_timeout_is_generous_for_reasoning_calls():
+    # A big orchestrator decomposition on a reasoning model legitimately takes
+    # minutes; 180s was too tight and timed out large-repo runs.
+    assert R.DEFAULT_TIMEOUT >= 300
+
+
+def test_make_client_honours_timeout(monkeypatch):
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+    client = R.make_client("doubleword", timeout=42.0)
+    assert client.timeout == 42.0
+
+
 def test_retry_gives_up_immediately_on_client_error():
     """A 4xx (e.g. context overflow) is deterministic — retrying just wastes time."""
     calls = {"n": 0}
