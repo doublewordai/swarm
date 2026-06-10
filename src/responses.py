@@ -219,28 +219,29 @@ def dispatch(client, requests: list[dict], *, service_tier, background, max_conc
 
     Blocking (realtime): fire all concurrently via a thread pool.
     Background (async): submit all, then poll each to completion.
-    A failed request becomes a failed resp dict; this never raises.
+    A failed request becomes a failed resp dict; this never raises. Each result
+    carries ``_elapsed_s`` (wall time for that call) so callers can attribute
+    latency to individual agents — the key signal when a swarm runs slow.
     """
     if not background:
         results: list = [None] * len(requests)
+
+        def timed_call(req):
+            t0 = time.monotonic()
+            try:
+                resp = call(client, service_tier=service_tier, background=False, **req)
+            except Exception as exc:  # noqa: BLE001 - record, never block the wave
+                resp = {"status": "failed", "output": [], "usage": {}, "_error": str(exc)}
+            resp["_elapsed_s"] = round(time.monotonic() - t0, 2)
+            return resp
+
         with ThreadPoolExecutor(max_workers=max_concurrent) as ex:
-            futs = {
-                ex.submit(call, client, service_tier=service_tier, background=False, **req): i
-                for i, req in enumerate(requests)
-            }
+            futs = {ex.submit(timed_call, req): i for i, req in enumerate(requests)}
             for fut in as_completed(futs):
-                i = futs[fut]
-                try:
-                    results[i] = fut.result()
-                except Exception as exc:  # noqa: BLE001 - record, never block the wave
-                    results[i] = {
-                        "status": "failed",
-                        "output": [],
-                        "usage": {},
-                        "_error": str(exc),
-                    }
+                results[futs[fut]] = fut.result()
         return results
 
+    t0 = time.monotonic()
     ids = []
     for req in requests:
         try:
@@ -250,7 +251,9 @@ def dispatch(client, requests: list[dict], *, service_tier, background, max_conc
     out = []
     for rid in ids:
         if rid:
-            out.append(poll(client, rid))
+            resp = poll(client, rid)
         else:
-            out.append({"status": "failed", "output": [], "usage": {}, "_error": "submit failed"})
+            resp = {"status": "failed", "output": [], "usage": {}, "_error": "submit failed"}
+        resp.setdefault("_elapsed_s", round(time.monotonic() - t0, 2))
+        out.append(resp)
     return out
