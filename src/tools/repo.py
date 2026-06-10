@@ -109,17 +109,51 @@ def grep(root: str, pattern: str, path: str | None = None, max_hits: int = 80) -
     return hits
 
 
-def build_repo_map(root: str, files: list[str], header_lines: int = 40) -> str:
-    """Compact text view of the repo for the orchestrator: path + size + headers."""
-    out = [f"Repository map — {len(files)} source files.\n"]
+def _file_size(root: str, rel: str) -> int:
+    try:
+        return os.path.getsize(os.path.join(root, rel))
+    except OSError:
+        return 0
+
+
+def _render_map(root: str, files: list[str], header_lines: int, note: str) -> str:
+    out = [f"Repository map — {len(files)} source files.{note}\n"]
     for rel in files:
-        full = os.path.join(root, rel)
-        try:
-            size = os.path.getsize(full)
-        except OSError:
-            size = 0
-        out.append(f"=== {rel} ({size} bytes) ===")
-        head = read_file(root, rel, max_chars=8000).splitlines()[:header_lines]
-        out.append("\n".join(head))
-        out.append("")
+        size = _file_size(root, rel)
+        if header_lines:
+            out.append(f"=== {rel} ({size} bytes) ===")
+            head = read_file(root, rel, max_chars=8000).splitlines()[:header_lines]
+            out.append("\n".join(head))
+            out.append("")
+        else:
+            out.append(f"{rel} ({size} bytes)")
+    return "\n".join(out)
+
+
+def build_repo_map(root: str, files: list[str], header_lines: int = 40,
+                   max_chars: int = 200_000) -> str:
+    """Compact text view of the repo for the orchestrator: path + size + headers.
+
+    Degrades to stay within ``max_chars`` (≈ a token budget) rather than blowing
+    the orchestrator's context on large repos: full headers → short headers →
+    tree-only (paths + sizes) → truncated tree. Degradation is announced in the
+    map itself so the orchestrator knows what it is (not) seeing.
+    """
+    for lines, note in ((header_lines, ""),
+                        (10, " (showing first 10 lines per file to fit context budget)"),
+                        (0, " (file headers omitted to fit context budget)")):
+        m = _render_map(root, files, lines, note)
+        if len(m) <= max_chars:
+            return m
+
+    # Last resort: tree-only, truncated file list.
+    head = f"Repository map — {len(files)} source files (file headers omitted to fit context budget).\n"
+    out, used = [head], len(head)
+    for i, rel in enumerate(files):
+        line = f"{rel} ({_file_size(root, rel)} bytes)"
+        if used + len(line) + 80 > max_chars:  # reserve room for the trailer
+            out.append(f"... and {len(files) - i} more files (map truncated to fit context budget)")
+            break
+        out.append(line)
+        used += len(line) + 1
     return "\n".join(out)
