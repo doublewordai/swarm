@@ -79,6 +79,7 @@ class SwarmConfig:
     reasoning_effort: str | None = "minimal"  # None → don't send reasoning.effort
     search_enabled: bool = False
     max_concurrent: int = 12             # parallel in-flight requests per dispatch
+    runtime: object = None               # agent backend (see runtimes.Runtime); None ⇒ responses
 
     def agent_model(self) -> str:
         return self.worker_model or self.model
@@ -237,8 +238,12 @@ def _req(model, input_items, tools_=None, temperature=0, max_output_tokens=8192,
 
 
 def _dispatch(client, reqs, cfg: SwarmConfig) -> list[dict]:
-    return R.dispatch(client, reqs, service_tier=cfg.service_tier,
-                      background=cfg.background, max_concurrent=cfg.max_concurrent)
+    # The one transport indirection: cfg.runtime swaps the backend (responses ⇄
+    # opencode ⇄ …). It must return Responses-shaped dicts, so the parsers below
+    # (text_of/function_calls_of/usage_of/finish_of) work unchanged. None ⇒ native.
+    runtime = cfg.runtime or R
+    return runtime.dispatch(client, reqs, service_tier=cfg.service_tier,
+                            background=cfg.background, max_concurrent=cfg.max_concurrent)
 
 
 def _new_tokens() -> dict:
