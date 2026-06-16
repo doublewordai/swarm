@@ -795,3 +795,47 @@ def test_solo_worker_uses_configured_output_budget(monkeypatch, tmp_path):
                      engine.SwarmConfig(model="m", solo=True, verify=False,
                                         worker_max_output_tokens=32768))
     assert captured[0][0]["max_output_tokens"] == 32768
+
+
+# --- runtime seam: the engine drives a swappable backend (v2 foundation) -------
+
+
+def test_engine_drives_an_injected_runtime(tmp_path):
+    # A runtime only has to return Responses-shaped dicts; the engine's parsers are
+    # shape-based. Prove run_swarm uses cfg.runtime instead of the responses module.
+    (tmp_path / "a.py").write_text("x = 1\n")
+    seq = iter([
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"sections": [{"title": "t", "purpose": "p"}]})],
+        [_text("done")],
+        [_text("# Guide")],
+    ])
+    seen = {"n": 0}
+
+    class FakeRuntime:
+        def make_client(self, provider="x", timeout=0):
+            return object()
+
+        def dispatch(self, client, requests, *, service_tier, background, max_concurrent):
+            seen["n"] += 1
+            return next(seq)
+
+    res = engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py"],
+                           engine.SwarmConfig(model="m", runtime=FakeRuntime()))
+    assert seen["n"] >= 1                       # the injected runtime did the work
+    assert len(res["results"]) == 1            # …and the pipeline ran on its output
+
+
+def test_default_runtime_is_responses(monkeypatch, tmp_path):
+    # With no runtime set, the engine still uses the responses module (back-compat:
+    # existing tests monkeypatch engine.R.dispatch and must keep working).
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _capture(monkeypatch, [
+        [_fc("dispatch_workers", {"workers": [{"role": "r", "focus": "f", "files": ["a.py"]}]})],
+        [_fc("submit_results", {"sections": [{"title": "t", "purpose": "p"}]})],
+        [_text("done")],
+        [_text("# Guide")],
+    ])
+    res = engine.run_swarm(None, get_brief("onboarding"), str(tmp_path), ["a.py"],
+                           engine.SwarmConfig(model="m"))   # no runtime → responses
+    assert len(res["results"]) == 1
