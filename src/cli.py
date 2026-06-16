@@ -183,8 +183,8 @@ def briefs():
               default="minimal", help="Reasoning depth; 'none' omits the param (non-reasoning models)")
 @click.option("--temperature", default=None,
               help="Sampling temperature (number), or 'none' to omit it (gpt-5-class models reject it)")
-@click.option("--interface", type=click.Choice(["structured", "kimi"]), default="structured",
-              help="structured (dispatch_workers) or kimi (create_subagent/assign_task, K2.5 §E.8)")
+@click.option("--interface", type=click.Choice(["structured", "kimi"]), default="kimi",
+              help="kimi (default; create_subagent/assign_task, K2.5 §E.8) or structured (dispatch_workers)")
 @click.option("--solo", is_flag=True,
               help="Single-agent baseline: one agent audits the whole repo, no orchestration "
                    "(big context + output budget). Ignores --interface.")

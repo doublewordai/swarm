@@ -62,10 +62,10 @@ swarm run <brief> --repo owner/name
         │   degrades (headers → tree → truncated) to fit the orchestrator's context budget
         ▼
    Orchestrator (LLM): decomposes the task + designs the team — picks strategy and width
-        │   itself; assigns work by directory (expanded engine-side) so a 500-file repo is
-        │   a handful of lines, not 500; can read_file/grep to probe first.
-        ├─ Worker 0  scope: …  ─┐ bounded local context: its files pre-loaded (within a
-        ├─ Worker 1  scope: …   │ char budget; the rest fetchable), own memory — returns
+        │   itself; authors specialist personas + dispatches scoped tasks (kimi, default)
+        │   or assigns directories (structured); can read_file/grep to probe first.
+        ├─ Worker 0  scope: …  ─┐ bounded local context: self-gathered (kimi) or pre-loaded
+        ├─ Worker 1  scope: …   │ (structured), own memory — returns
         └─ Worker K  scope: …  ─┘ ONLY schema-valid results (its research is discarded).
         ▼   route-back: per-worker status + unreported files → orchestrator may fill gaps
    Dedupe → (optional) Verifier panel: N independent skeptics per item (majority vote).
@@ -87,14 +87,16 @@ with partial coverage.
 
 Two orchestration interfaces, plus a single-agent baseline:
 
-- **`--interface structured`** (default) — the orchestrator calls `dispatch_workers([{role,
-  focus, paths}])` and the harness preloads each worker's files. Decomposes by **scope**
-  (assign directories) — fast and deterministic on large repos.
-- **`--interface kimi`** — the tool surface Kimi K2.5/K2.6 were RL-trained on (K2.5 report,
-  Appendix E.8): `create_subagent(name, system_prompt)` lets the orchestrator author each
-  specialist's prompt, then `assign_task(agent, prompt)` dispatches free-text tasks that run
-  in parallel. Decomposes by **task** — the sub-agent self-gathers its own context with
-  `read_file`/`grep`, as in the paper. (Personas are reusable; each task is a fresh agent.)
+- **`--interface kimi`** (default) — the tool surface Kimi K2.5/K2.6 were RL-trained on
+  (K2.5 report, Appendix E.8): `create_subagent(name, system_prompt)` lets the orchestrator
+  author each specialist's prompt, then `assign_task(agent, prompt)` dispatches free-text
+  tasks that run in parallel. Decomposes by **task** — the sub-agent self-gathers its own
+  context with `read_file`/`grep`, as in the paper. (Personas are reusable; each task is a
+  fresh agent.)
+- **`--interface structured`** — the orchestrator calls `dispatch_workers([{role, focus,
+  paths}])` and the harness preloads each worker's files. Decomposes by **scope** (assign
+  directories) — simple and deterministic; a good fit when you want tighter control on
+  large repos.
 - **`--solo`** — one agent, no orchestration, the whole repo in one large context: the
   paper's single-agent baseline. Same verify/synthesize tail, so the outputs are
   shape-identical to a swarm run — point both at the same repo and compare findings,
@@ -126,7 +128,7 @@ being explicit just saves the one extra round-trip.)
 
 ## Useful flags
 
-- **Mode & models:** `--interface structured|kimi` · `--solo` · `-m/--model` ·
+- **Mode & models:** `--interface kimi|structured` (default kimi) · `--solo` · `-m/--model` ·
   `--worker-model` (cheap workers, strong orchestrator/synthesizer).
 - **Context budget:** `--context-chars` (per-agent preload, ~4 chars/token) ·
   `--max-output-tokens` — size them to your model's window.

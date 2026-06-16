@@ -3,14 +3,24 @@ from click.testing import CliRunner
 from src.cli import cli
 
 
-def test_run_dryrun_audit(tmp_path):
+def test_run_dryrun_audit_defaults_to_kimi(tmp_path):
+    # No --interface → kimi (the default); the orchestrator gets the trained surface.
     (tmp_path / "a.py").write_text("x = 1\n")
     r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path), "-m", "k2.6",
                                  "--dry-run", "-o", str(tmp_path / "out")])
     assert r.exit_code == 0, r.output
-    assert "moonshotai/Kimi-K2.6" in r.output      # alias resolved
-    assert "dispatch_workers" in r.output           # orchestrator tool
-    assert "submit_results" in r.output             # worker terminal
+    assert "moonshotai/Kimi-K2.6" in r.output                       # alias resolved
+    assert "create_subagent" in r.output and "assign_task" in r.output  # kimi default
+    assert "submit_results" in r.output                            # worker terminal
+
+
+def test_run_dryrun_structured_interface(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    r = CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                 "--interface", "structured", "--dry-run",
+                                 "-o", str(tmp_path / "out")])
+    assert r.exit_code == 0, r.output
+    assert "dispatch_workers" in r.output           # structured orchestrator tool
 
 
 def test_run_dryrun_onboarding_has_no_verify(tmp_path):
@@ -142,7 +152,9 @@ def _invoke(tmp_path, monkeypatch, extra_args):
     seq = _run_seq(tmp_path)
     monkeypatch.setattr(R, "dispatch", lambda *a, **k: next(seq))
     monkeypatch.setenv("DOUBLEWORD_API_KEY", "x")
+    # _run_seq mocks the structured dispatch_workers flow, so pin the interface.
     return CliRunner().invoke(cli, ["run", "audit", "--path", str(tmp_path),
+                                    "--interface", "structured",
                                     "-o", str(tmp_path / "out")] + extra_args)
 
 

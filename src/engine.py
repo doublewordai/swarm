@@ -7,13 +7,13 @@ per-role tools, dedupe/verify hooks); this module never mentions audits.
 
 Two orchestration interfaces (``cfg.interface``):
 
-- ``structured`` (default): the orchestrator calls ``dispatch_workers`` with
-  ``{role, focus, files}`` specs; the harness builds each worker's bounded context.
-- ``kimi``: the interface Kimi K2.5/K2.6 were RL-trained on (K2.5 tech report,
-  Appendix E.8): ``create_subagent(name, system_prompt)`` registers reusable agent
-  configs whose system prompts the orchestrator itself authors, and
-  ``assign_task(agent, prompt[, files])`` dispatches tasks to them incrementally.
-  Parallel ``assign_task`` calls in one turn run concurrently.
+- ``kimi`` (default): the interface Kimi K2.5/K2.6 were RL-trained on (K2.5 tech
+  report, Appendix E.8): ``create_subagent(name, system_prompt)`` registers reusable
+  agent configs whose system prompts the orchestrator itself authors, and
+  ``assign_task(agent, prompt)`` dispatches tasks to them; the sub-agent self-gathers
+  its context. Parallel ``assign_task`` calls in one turn run concurrently.
+- ``structured``: the orchestrator calls ``dispatch_workers`` with ``{role, focus,
+  files/paths}`` specs; the harness builds each worker's bounded context.
 
 Either way the downstream pipeline is identical: dedupe → verify (vote panel) →
 synthesize. Failure is loud: a dead orchestrator or a workerless run raises
@@ -56,7 +56,7 @@ class Agent:
 class SwarmConfig:
     model: str
     worker_model: str | None = None      # model for workers/verifiers (None ⇒ model)
-    interface: str = "structured"        # structured | kimi (see module docstring)
+    interface: str = "kimi"              # kimi (default) | structured (see module docstring)
     solo: bool = False                   # one agent does the whole repo, no orchestration
     service_tier: str = "priority"
     background: bool = False
